@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 clx = "0.2"
-console = "0.15"
+console = "0.16"
 indexmap = "2"
 indicatif = "0.17"
 itertools = "0.14"
