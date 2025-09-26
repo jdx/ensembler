@@ -31,7 +31,6 @@ pub struct CmdLineRunner {
     show_stderr_on_error: bool,
     stderr_to_progress: bool,
     stdout_to_progress: bool,
-    silent_until_error: bool,
     cancel: CancellationToken,
 }
 
@@ -60,9 +59,8 @@ impl CmdLineRunner {
             redactions: Default::default(),
             pass_signals: false,
             show_stderr_on_error: true,
-            stderr_to_progress: true,
-            stdout_to_progress: true,
-            silent_until_error: false,
+            stderr_to_progress: false,
+            stdout_to_progress: false,
             cancel: CancellationToken::new(),
         }
     }
@@ -142,10 +140,6 @@ impl CmdLineRunner {
         self
     }
 
-    pub fn silent_until_error(mut self, enable: bool) -> Self {
-        self.silent_until_error = enable;
-        self
-    }
 
     pub fn current_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.cmd.current_dir(dir);
@@ -235,7 +229,6 @@ impl CmdLineRunner {
             let redactions = self.redactions.clone();
             let pr = self.pr.clone();
             let stdout_to_progress = self.stdout_to_progress;
-            let silent_until_error = self.silent_until_error;
             tokio::spawn(async move {
                 let stdout = BufReader::new(stdout);
                 let mut lines = stdout.lines();
@@ -268,7 +261,6 @@ impl CmdLineRunner {
             let redactions = self.redactions.clone();
             let pr = self.pr.clone();
             let stderr_to_progress = self.stderr_to_progress;
-            let silent_until_error = self.silent_until_error;
             tokio::spawn(async move {
                 let stderr = BufReader::new(stderr);
                 let mut lines = stderr.lines();
@@ -286,8 +278,8 @@ impl CmdLineRunner {
                             // Update progress bar like stdout does
                             pr.prop("ensembler_stdout", &line);
                             pr.update();
-                        } else if !silent_until_error {
-                            // Print above progress bars only when not silent
+                        } else {
+                            // Print above progress bars
                             pr.println(&line);
                         }
                     }
