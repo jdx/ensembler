@@ -30,6 +30,8 @@ pub struct CmdLineRunner {
     pass_signals: bool,
     show_stderr_on_error: bool,
     stderr_to_progress: bool,
+    stdout_to_progress: bool,
+    silent_until_error: bool,
     cancel: CancellationToken,
 }
 
@@ -58,7 +60,9 @@ impl CmdLineRunner {
             redactions: Default::default(),
             pass_signals: false,
             show_stderr_on_error: true,
-            stderr_to_progress: false,
+            stderr_to_progress: true,
+            stdout_to_progress: true,
+            silent_until_error: false,
             cancel: CancellationToken::new(),
         }
     }
@@ -130,6 +134,16 @@ impl CmdLineRunner {
 
     pub fn stderr_to_progress(mut self, enable: bool) -> Self {
         self.stderr_to_progress = enable;
+        self
+    }
+
+    pub fn stdout_to_progress(mut self, enable: bool) -> Self {
+        self.stdout_to_progress = enable;
+        self
+    }
+
+    pub fn silent_until_error(mut self, enable: bool) -> Self {
+        self.silent_until_error = enable;
         self
     }
 
@@ -220,6 +234,8 @@ impl CmdLineRunner {
             let combined_output = combined_output.clone();
             let redactions = self.redactions.clone();
             let pr = self.pr.clone();
+            let stdout_to_progress = self.stdout_to_progress;
+            let silent_until_error = self.silent_until_error;
             tokio::spawn(async move {
                 let stdout = BufReader::new(stdout);
                 let mut lines = stdout.lines();
@@ -233,8 +249,10 @@ impl CmdLineRunner {
                     result.combined_output += &line;
                     result.combined_output += "\n";
                     if let Some(pr) = &pr {
-                        pr.prop("ensembler_stdout", &line);
-                        pr.update();
+                        if stdout_to_progress && !silent_until_error {
+                            pr.prop("ensembler_stdout", &line);
+                            pr.update();
+                        }
                     }
                     combined_output.lock().await.push(line);
                 }
@@ -250,6 +268,7 @@ impl CmdLineRunner {
             let redactions = self.redactions.clone();
             let pr = self.pr.clone();
             let stderr_to_progress = self.stderr_to_progress;
+            let silent_until_error = self.silent_until_error;
             tokio::spawn(async move {
                 let stderr = BufReader::new(stderr);
                 let mut lines = stderr.lines();
@@ -263,11 +282,11 @@ impl CmdLineRunner {
                     result.combined_output += &line;
                     result.combined_output += "\n";
                     if let Some(pr) = &pr {
-                        if stderr_to_progress {
+                        if stderr_to_progress && !silent_until_error {
                             // Update progress bar like stdout does
                             pr.prop("ensembler_stdout", &line);
                             pr.update();
-                        } else {
+                        } else if !silent_until_error {
                             // Print above progress bars (current behavior)
                             pr.println(&line);
                         }
