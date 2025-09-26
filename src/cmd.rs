@@ -249,7 +249,7 @@ impl CmdLineRunner {
                     result.combined_output += &line;
                     result.combined_output += "\n";
                     if let Some(pr) = &pr {
-                        if stdout_to_progress && !silent_until_error {
+                        if stdout_to_progress {
                             pr.prop("ensembler_stdout", &line);
                             pr.update();
                         }
@@ -282,12 +282,12 @@ impl CmdLineRunner {
                     result.combined_output += &line;
                     result.combined_output += "\n";
                     if let Some(pr) = &pr {
-                        if stderr_to_progress && !silent_until_error {
+                        if stderr_to_progress {
                             // Update progress bar like stdout does
                             pr.prop("ensembler_stdout", &line);
                             pr.update();
                         } else if !silent_until_error {
-                            // Print above progress bars (current behavior)
+                            // Print above progress bars only when not silent
                             pr.println(&line);
                         }
                     }
