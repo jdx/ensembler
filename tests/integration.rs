@@ -212,8 +212,12 @@ async fn test_cancellation() {
         .execute()
         .await;
 
-    // The command should have been killed
-    assert!(result.is_err());
+    // The command should have been cancelled with specific error type
+    assert!(
+        matches!(result, Err(Error::Cancelled)),
+        "Expected Cancelled error, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]

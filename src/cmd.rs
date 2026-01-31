@@ -419,10 +419,13 @@ impl CmdLineRunner {
         } else {
             drop(stdin_flush);
         }
+        let mut was_cancelled = false;
         let status = loop {
             select! {
                 _ = self.cancel.cancelled() => {
-                    cp.kill().await?;
+                    was_cancelled = true;
+                    // Ignore kill error if process already exited
+                    let _ = cp.kill().await;
                 }
                 status = cp.wait() => {
                     break status?;
@@ -432,6 +435,14 @@ impl CmdLineRunner {
         if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
             debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
         }
+
+        if was_cancelled {
+            if let Some(pr) = &self.pr {
+                pr.set_status(progress::ProgressStatus::Failed);
+            }
+            return Err(crate::Error::Cancelled);
+        }
+
         result.lock().await.status = status;
 
         // these are sent when the process has flushed IO

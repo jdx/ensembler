@@ -24,6 +24,10 @@ pub enum Error {
     #[error("{} exited with non-zero status: {}\n{}", .0.0, render_exit_status(&.0.3), .0.2)]
     ScriptFailed(Box<(String, Vec<String>, String, CmdResult)>),
 
+    /// The command was cancelled via a cancellation token.
+    #[error("command was cancelled")]
+    Cancelled,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
