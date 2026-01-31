@@ -4,6 +4,7 @@ use crate::cmd::CmdResult;
 
 /// Errors that can occur when executing commands.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// An I/O error occurred (e.g., command not found, permission denied).
     #[error(transparent)]
