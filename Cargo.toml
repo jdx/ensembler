@@ -19,6 +19,7 @@ default = ["progress"]
 progress = ["dep:clx"]
 
 [dependencies]
+aho-corasick = "1"
 clx = { version = "<1", optional = true }
 console = "0.16"
 indexmap = "2"

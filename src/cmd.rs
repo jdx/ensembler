@@ -1,4 +1,5 @@
 use crate::Result;
+use aho_corasick::AhoCorasick;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
@@ -399,20 +400,33 @@ impl CmdLineRunner {
         }
         let result = Arc::new(Mutex::new(CmdResult::default()));
         let combined_output = Arc::new(Mutex::new(Vec::new()));
+
+        // Build Aho-Corasick automaton for efficient multi-pattern redaction
+        let redactor: Option<Arc<(AhoCorasick, Vec<&str>)>> = if self.redactions.is_empty() {
+            None
+        } else {
+            let ac =
+                AhoCorasick::new(self.redactions.iter()).expect("failed to build redaction matcher");
+            // Build replacement array with "[redacted]" for each pattern
+            let replacements: Vec<&str> = vec!["[redacted]"; self.redactions.len()];
+            Some(Arc::new((ac, replacements)))
+        };
+
         let (stdout_flush, stdout_ready) = oneshot::channel();
         if let Some(stdout) = cp.stdout.take() {
             let result = result.clone();
             let combined_output = combined_output.clone();
-            let redactions = self.redactions.clone();
+            let redactor = redactor.clone();
             #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             tokio::spawn(async move {
                 let stdout = BufReader::new(stdout);
                 let mut lines = stdout.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = redactions
-                        .iter()
-                        .fold(line, |acc, r| acc.replace(r, "[redacted]"));
+                    let line = match &redactor {
+                        Some(r) => r.0.replace_all(&line, &r.1),
+                        None => line,
+                    };
                     let mut result = result.lock().await;
                     result.stdout += &line;
                     result.stdout += "\n";
@@ -434,7 +448,6 @@ impl CmdLineRunner {
         if let Some(stderr) = cp.stderr.take() {
             let result = result.clone();
             let combined_output = combined_output.clone();
-            let redactions = self.redactions.clone();
             #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             #[cfg(feature = "progress")]
@@ -443,9 +456,10 @@ impl CmdLineRunner {
                 let stderr = BufReader::new(stderr);
                 let mut lines = stderr.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = redactions
-                        .iter()
-                        .fold(line, |acc, r| acc.replace(r, "[redacted]"));
+                    let line = match &redactor {
+                        Some(r) => r.0.replace_all(&line, &r.1),
+                        None => line,
+                    };
                     let mut result = result.lock().await;
                     result.stderr += &line;
                     result.stderr += "\n";
