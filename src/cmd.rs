@@ -208,13 +208,19 @@ impl CmdLineRunner {
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
         let mut cp = self.cmd.spawn()?;
-        let id = cp
-            .id()
-            .ok_or_else(|| crate::Error::Internal("process has no id".to_string()))?;
-        RUNNING_PIDS
-            .lock()
-            .map_err(|e| crate::Error::Internal(format!("failed to lock RUNNING_PIDS: {e}")))?
-            .insert(id);
+        let id = match cp.id() {
+            Some(id) => id,
+            None => {
+                let _ = cp.kill().await;
+                return Err(crate::Error::Internal("process has no id".to_string()));
+            }
+        };
+        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.insert(id)) {
+            let _ = cp.kill().await;
+            return Err(crate::Error::Internal(format!(
+                "failed to lock RUNNING_PIDS: {e}"
+            )));
+        }
         trace!("Started process: {id} for {}", self.program);
         if let Some(pr) = &self.pr {
             // pr.prop("bin", &self.program);
@@ -292,17 +298,18 @@ impl CmdLineRunner {
         }
         let (stdin_flush, stdin_ready) = oneshot::channel();
         if let Some(text) = self.stdin.take() {
-            if let Some(mut stdin) = cp.stdin.take() {
-                tokio::spawn(async move {
-                    if let Err(e) = stdin.write_all(text.as_bytes()).await {
-                        debug!("Failed to write to stdin: {e}");
-                    }
-                    let _ = stdin_flush.send(());
-                });
-            } else {
-                debug!("stdin was requested but not available");
-                drop(stdin_flush);
-            }
+            let Some(mut stdin) = cp.stdin.take() else {
+                let _ = cp.kill().await;
+                return Err(crate::Error::Internal(
+                    "stdin was requested but not available".to_string(),
+                ));
+            };
+            tokio::spawn(async move {
+                if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                    debug!("Failed to write to stdin: {e}");
+                }
+                let _ = stdin_flush.send(());
+            });
         } else {
             drop(stdin_flush);
         }
@@ -316,8 +323,8 @@ impl CmdLineRunner {
                 }
             }
         };
-        if let Ok(mut pids) = RUNNING_PIDS.lock() {
-            pids.remove(&id);
+        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+            debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
         }
         result.lock().await.status = status;
 
