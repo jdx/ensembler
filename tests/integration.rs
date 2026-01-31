@@ -27,6 +27,7 @@ async fn test_multiple_args() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_stdout_capture() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -40,6 +41,7 @@ async fn test_stdout_capture() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_stderr_capture() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -54,6 +56,7 @@ async fn test_stderr_capture() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_combined_output() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -68,6 +71,7 @@ async fn test_combined_output() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_exit_code_failure() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -99,6 +103,7 @@ async fn test_redaction_stdout() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Windows echo includes quotes around args with spaces
 async fn test_redaction_multiple() {
     let result = CmdLineRunner::new("echo")
         .arg("secret1 and secret2")
@@ -112,6 +117,7 @@ async fn test_redaction_multiple() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_redaction_stderr() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -127,6 +133,7 @@ async fn test_redaction_stderr() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_environment_variable() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -141,6 +148,7 @@ async fn test_environment_variable() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_environment_multiple() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -155,6 +163,7 @@ async fn test_environment_multiple() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_current_dir() {
     let result = CmdLineRunner::new("pwd")
         .current_dir("/tmp")
@@ -172,6 +181,7 @@ async fn test_current_dir() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_stdin_string() {
     let result = CmdLineRunner::new("cat")
         .stdin_string("hello from stdin")
@@ -184,6 +194,7 @@ async fn test_stdin_string() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_stdin_multiline() {
     let result = CmdLineRunner::new("cat")
         .stdin_string("line1\nline2\nline3")
@@ -196,6 +207,7 @@ async fn test_stdin_multiline() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_cancellation() {
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
@@ -221,6 +233,7 @@ async fn test_cancellation() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_opt_arg_some() {
     let result = CmdLineRunner::new("echo")
         .opt_arg(Some("-n"))
@@ -255,14 +268,16 @@ async fn test_command_not_found() {
         .execute()
         .await;
 
+    // On Windows with cmd.exe wrapping, this may be ScriptFailed instead of Io
     assert!(
-        matches!(result, Err(Error::Io(_))),
-        "Expected Io error, got {:?}",
+        matches!(result, Err(Error::Io(_)) | Err(Error::ScriptFailed(_))),
+        "Expected Io or ScriptFailed error, got {:?}",
         result
     );
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_empty_output() {
     let result = CmdLineRunner::new("true").execute().await.unwrap();
 
@@ -272,6 +287,7 @@ async fn test_empty_output() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_large_output() {
     // Generate 1000 lines of output
     let result = CmdLineRunner::new("bash")
@@ -309,6 +325,7 @@ async fn test_cmd_result_default() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_error_message_contains_program_name() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -322,6 +339,7 @@ async fn test_error_message_contains_program_name() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Windows echo includes quotes around args with spaces
 async fn test_special_characters_in_args() {
     let result = CmdLineRunner::new("echo")
         .arg("hello world")
@@ -334,6 +352,7 @@ async fn test_special_characters_in_args() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_newlines_in_output() {
     let result = CmdLineRunner::new("printf")
         .arg("a\nb\nc")
