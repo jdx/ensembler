@@ -23,6 +23,12 @@ use crate::Error::ScriptFailed;
 #[cfg(feature = "progress")]
 use clx::progress::{self, ProgressJob};
 
+/// Holds the Aho-Corasick automaton and replacement strings for redaction.
+struct Redactor {
+    automaton: AhoCorasick,
+    replacements: Vec<&'static str>,
+}
+
 /// A builder for executing external commands with advanced output handling.
 ///
 /// `CmdLineRunner` provides a fluent API for configuring and executing external
@@ -402,14 +408,17 @@ impl CmdLineRunner {
         let combined_output = Arc::new(Mutex::new(Vec::new()));
 
         // Build Aho-Corasick automaton for efficient multi-pattern redaction
-        let redactor: Option<Arc<(AhoCorasick, Vec<&str>)>> = if self.redactions.is_empty() {
+        let redactor: Option<Arc<Redactor>> = if self.redactions.is_empty() {
             None
         } else {
-            let ac =
-                AhoCorasick::new(self.redactions.iter()).expect("failed to build redaction matcher");
-            // Build replacement array with "[redacted]" for each pattern
-            let replacements: Vec<&str> = vec!["[redacted]"; self.redactions.len()];
-            Some(Arc::new((ac, replacements)))
+            let automaton = AhoCorasick::new(self.redactions.iter()).map_err(|e| {
+                crate::Error::Internal(format!("failed to build redaction matcher: {e}"))
+            })?;
+            let replacements = vec!["[redacted]"; self.redactions.len()];
+            Some(Arc::new(Redactor {
+                automaton,
+                replacements,
+            }))
         };
 
         let (stdout_flush, stdout_ready) = oneshot::channel();
@@ -424,7 +433,7 @@ impl CmdLineRunner {
                 let mut lines = stdout.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let line = match &redactor {
-                        Some(r) => r.0.replace_all(&line, &r.1),
+                        Some(r) => r.automaton.replace_all(&line, &r.replacements),
                         None => line,
                     };
                     let mut result = result.lock().await;
@@ -457,7 +466,7 @@ impl CmdLineRunner {
                 let mut lines = stderr.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let line = match &redactor {
-                        Some(r) => r.0.replace_all(&line, &r.1),
+                        Some(r) => r.automaton.replace_all(&line, &r.replacements),
                         None => line,
                     };
                     let mut result = result.lock().await;
