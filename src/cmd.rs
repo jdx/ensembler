@@ -19,6 +19,7 @@ use indexmap::IndexSet;
 use std::sync::LazyLock as Lazy;
 
 use crate::Error::ScriptFailed;
+#[cfg(feature = "progress")]
 use clx::progress::{self, ProgressJob};
 
 /// A builder for executing external commands with advanced output handling.
@@ -48,6 +49,7 @@ pub struct CmdLineRunner {
     cmd: Command,
     program: String,
     args: Vec<String>,
+    #[cfg(feature = "progress")]
     pr: Option<Arc<ProgressJob>>,
     stdin: Option<String>,
     redactions: IndexSet<String>,
@@ -82,6 +84,7 @@ impl CmdLineRunner {
             cmd,
             program,
             args: vec![],
+            #[cfg(feature = "progress")]
             pr: None,
             stdin: None,
             redactions: Default::default(),
@@ -186,6 +189,9 @@ impl CmdLineRunner {
     ///
     /// The progress bar will be updated with the command being run and
     /// its output. Uses the `clx` crate's progress bar system.
+    ///
+    /// This method is only available when the `progress` feature is enabled.
+    #[cfg(feature = "progress")]
     pub fn with_pr(mut self, pr: Arc<ProgressJob>) -> Self {
         self.pr = Some(pr);
         self
@@ -375,6 +381,7 @@ impl CmdLineRunner {
             )));
         }
         trace!("Started process: {id} for {}", self.program);
+        #[cfg(feature = "progress")]
         if let Some(pr) = &self.pr {
             pr.prop("ensembler_cmd", &self.to_string());
             pr.prop("ensembler_stdout", &"".to_string());
@@ -387,6 +394,7 @@ impl CmdLineRunner {
             let result = result.clone();
             let combined_output = combined_output.clone();
             let redactions = self.redactions.clone();
+            #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             tokio::spawn(async move {
                 let stdout = BufReader::new(stdout);
@@ -400,6 +408,7 @@ impl CmdLineRunner {
                     result.stdout += "\n";
                     result.combined_output += &line;
                     result.combined_output += "\n";
+                    #[cfg(feature = "progress")]
                     if let Some(pr) = &pr {
                         pr.prop("ensembler_stdout", &line);
                         pr.update();
@@ -416,7 +425,9 @@ impl CmdLineRunner {
             let result = result.clone();
             let combined_output = combined_output.clone();
             let redactions = self.redactions.clone();
+            #[cfg(feature = "progress")]
             let pr = self.pr.clone();
+            #[cfg(feature = "progress")]
             let stderr_to_progress = self.stderr_to_progress;
             tokio::spawn(async move {
                 let stderr = BufReader::new(stderr);
@@ -430,6 +441,7 @@ impl CmdLineRunner {
                     result.stderr += "\n";
                     result.combined_output += &line;
                     result.combined_output += "\n";
+                    #[cfg(feature = "progress")]
                     if let Some(pr) = &pr {
                         if stderr_to_progress {
                             // Update progress bar like stdout does
@@ -454,6 +466,7 @@ impl CmdLineRunner {
                 if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
                     debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
                 }
+                #[cfg(feature = "progress")]
                 if let Some(pr) = &self.pr {
                     pr.set_status(progress::ProgressStatus::Failed);
                 }
@@ -509,6 +522,7 @@ impl CmdLineRunner {
         }
 
         if was_cancelled {
+            #[cfg(feature = "progress")]
             if let Some(pr) = &self.pr {
                 pr.set_status(progress::ProgressStatus::Failed);
             }
@@ -516,6 +530,7 @@ impl CmdLineRunner {
         }
 
         if timed_out {
+            #[cfg(feature = "progress")]
             if let Some(pr) = &self.pr {
                 pr.set_status(progress::ProgressStatus::Failed);
             }
@@ -530,6 +545,7 @@ impl CmdLineRunner {
         let _ = stdin_ready.await;
 
         if status.success() || self.allow_non_zero {
+            #[cfg(feature = "progress")]
             if let Some(pr) = &self.pr {
                 pr.set_status(progress::ProgressStatus::Done);
             }
@@ -544,6 +560,7 @@ impl CmdLineRunner {
 
     fn on_error(&self, output: String, result: CmdResult) -> Result<()> {
         let output = output.trim().to_string();
+        #[cfg(feature = "progress")]
         if let Some(pr) = &self.pr {
             pr.set_status(progress::ProgressStatus::Failed);
             if self.show_stderr_on_error {
