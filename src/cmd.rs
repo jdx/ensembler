@@ -65,7 +65,10 @@ impl CmdLineRunner {
 
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
-        let pids = RUNNING_PIDS.lock().unwrap();
+        let Ok(pids) = RUNNING_PIDS.lock() else {
+            debug!("Failed to acquire lock on RUNNING_PIDS");
+            return;
+        };
         for pid in pids.iter() {
             let pid = *pid as i32;
             trace!("{signal}: {pid}");
@@ -77,7 +80,10 @@ impl CmdLineRunner {
 
     #[cfg(windows)]
     pub fn kill_all() {
-        let pids = RUNNING_PIDS.lock().unwrap();
+        let Ok(pids) = RUNNING_PIDS.lock() else {
+            debug!("Failed to acquire lock on RUNNING_PIDS");
+            return;
+        };
         for pid in pids.iter() {
             if let Err(e) = Command::new("taskkill")
                 .arg("/F")
@@ -202,8 +208,13 @@ impl CmdLineRunner {
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
         let mut cp = self.cmd.spawn()?;
-        let id = cp.id().unwrap();
-        RUNNING_PIDS.lock().unwrap().insert(id);
+        let id = cp
+            .id()
+            .ok_or_else(|| crate::Error::Internal("process has no id".to_string()))?;
+        RUNNING_PIDS
+            .lock()
+            .map_err(|e| crate::Error::Internal(format!("failed to lock RUNNING_PIDS: {e}")))?
+            .insert(id);
         trace!("Started process: {id} for {}", self.program);
         if let Some(pr) = &self.pr {
             // pr.prop("bin", &self.program);
@@ -281,11 +292,17 @@ impl CmdLineRunner {
         }
         let (stdin_flush, stdin_ready) = oneshot::channel();
         if let Some(text) = self.stdin.take() {
-            let mut stdin = cp.stdin.take().unwrap();
-            tokio::spawn(async move {
-                stdin.write_all(text.as_bytes()).await.unwrap();
-                let _ = stdin_flush.send(());
-            });
+            if let Some(mut stdin) = cp.stdin.take() {
+                tokio::spawn(async move {
+                    if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                        debug!("Failed to write to stdin: {e}");
+                    }
+                    let _ = stdin_flush.send(());
+                });
+            } else {
+                debug!("stdin was requested but not available");
+                drop(stdin_flush);
+            }
         } else {
             drop(stdin_flush);
         }
@@ -299,7 +316,9 @@ impl CmdLineRunner {
                 }
             }
         };
-        RUNNING_PIDS.lock().unwrap().remove(&id);
+        if let Ok(mut pids) = RUNNING_PIDS.lock() {
+            pids.remove(&id);
+        }
         result.lock().await.status = status;
 
         // these are sent when the process has flushed IO
