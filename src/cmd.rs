@@ -1,4 +1,5 @@
 use crate::Result;
+use aho_corasick::AhoCorasick;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
@@ -21,6 +22,12 @@ use std::sync::LazyLock as Lazy;
 use crate::Error::ScriptFailed;
 #[cfg(feature = "progress")]
 use clx::progress::{self, ProgressJob};
+
+/// Holds the Aho-Corasick automaton and replacement strings for redaction.
+struct Redactor {
+    automaton: AhoCorasick,
+    replacements: Vec<&'static str>,
+}
 
 /// A builder for executing external commands with advanced output handling.
 ///
@@ -376,6 +383,22 @@ impl CmdLineRunner {
     /// - [`Error::ScriptFailed`] if the command exits with a non-zero status
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
+
+        // Build Aho-Corasick automaton for efficient multi-pattern redaction
+        // This is done before spawning to avoid orphan processes on build failure
+        let redactor: Option<Arc<Redactor>> = if self.redactions.is_empty() {
+            None
+        } else {
+            let automaton = AhoCorasick::new(self.redactions.iter()).map_err(|e| {
+                crate::Error::Internal(format!("failed to build redaction matcher: {e}"))
+            })?;
+            let replacements = vec!["[redacted]"; self.redactions.len()];
+            Some(Arc::new(Redactor {
+                automaton,
+                replacements,
+            }))
+        };
+
         let mut cp = self.cmd.spawn()?;
         let id = match cp.id() {
             Some(id) => id,
@@ -399,20 +422,22 @@ impl CmdLineRunner {
         }
         let result = Arc::new(Mutex::new(CmdResult::default()));
         let combined_output = Arc::new(Mutex::new(Vec::new()));
+
         let (stdout_flush, stdout_ready) = oneshot::channel();
         if let Some(stdout) = cp.stdout.take() {
             let result = result.clone();
             let combined_output = combined_output.clone();
-            let redactions = self.redactions.clone();
+            let redactor = redactor.clone();
             #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             tokio::spawn(async move {
                 let stdout = BufReader::new(stdout);
                 let mut lines = stdout.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = redactions
-                        .iter()
-                        .fold(line, |acc, r| acc.replace(r, "[redacted]"));
+                    let line = match &redactor {
+                        Some(r) => r.automaton.replace_all(&line, &r.replacements),
+                        None => line,
+                    };
                     let mut result = result.lock().await;
                     result.stdout += &line;
                     result.stdout += "\n";
@@ -434,7 +459,6 @@ impl CmdLineRunner {
         if let Some(stderr) = cp.stderr.take() {
             let result = result.clone();
             let combined_output = combined_output.clone();
-            let redactions = self.redactions.clone();
             #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             #[cfg(feature = "progress")]
@@ -443,9 +467,10 @@ impl CmdLineRunner {
                 let stderr = BufReader::new(stderr);
                 let mut lines = stderr.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = redactions
-                        .iter()
-                        .fold(line, |acc, r| acc.replace(r, "[redacted]"));
+                    let line = match &redactor {
+                        Some(r) => r.automaton.replace_all(&line, &r.replacements),
+                        None => line,
+                    };
                     let mut result = result.lock().await;
                     result.stderr += &line;
                     result.stderr += "\n";

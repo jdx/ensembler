@@ -309,6 +309,7 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 name = "ensembler"
 version = "0.3.0"
 dependencies = [
+ "aho-corasick",
  "clx",
  "console",
  "indexmap",
