@@ -342,3 +342,31 @@ async fn test_newlines_in_output() {
     // line-based reader adds a newline after the last line. This is expected behavior.
     assert_eq!(result.stdout, "a\nb\nc\n");
 }
+
+#[tokio::test]
+async fn test_allow_non_zero() {
+    let result = CmdLineRunner::new("bash")
+        .arg("-c")
+        .arg("echo 'output'; exit 42")
+        .allow_non_zero(true)
+        .execute()
+        .await
+        .unwrap();
+
+    // Command returned Ok even though exit code was non-zero
+    assert_eq!(result.status.code(), Some(42));
+    assert_eq!(result.stdout.trim(), "output");
+}
+
+#[tokio::test]
+async fn test_allow_non_zero_false() {
+    // Default behavior: non-zero exit is an error
+    let result = CmdLineRunner::new("bash")
+        .arg("-c")
+        .arg("exit 1")
+        .allow_non_zero(false)
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::ScriptFailed(_))));
+}

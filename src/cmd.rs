@@ -54,6 +54,7 @@ pub struct CmdLineRunner {
     show_stderr_on_error: bool,
     stderr_to_progress: bool,
     cancel: CancellationToken,
+    allow_non_zero: bool,
 }
 
 static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
@@ -87,6 +88,7 @@ impl CmdLineRunner {
             show_stderr_on_error: true,
             stderr_to_progress: false,
             cancel: CancellationToken::new(),
+            allow_non_zero: false,
         }
     }
 
@@ -210,6 +212,37 @@ impl CmdLineRunner {
     /// When disabled (default), stderr is printed above the progress bar.
     pub fn stderr_to_progress(mut self, enable: bool) -> Self {
         self.stderr_to_progress = enable;
+        self
+    }
+
+    /// Allows the command to exit with a non-zero status without returning an error.
+    ///
+    /// When enabled, the command result is returned even if the exit code is non-zero.
+    /// This is useful when you need to capture output from commands that may fail
+    /// but still produce useful output.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ensembler::CmdLineRunner;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> ensembler::Result<()> {
+    /// let result = CmdLineRunner::new("bash")
+    ///     .arg("-c")
+    ///     .arg("echo 'output'; exit 1")
+    ///     .allow_non_zero(true)
+    ///     .execute()
+    ///     .await?;
+    ///
+    /// // Command succeeded (no error) even though exit code was 1
+    /// assert_eq!(result.status.code(), Some(1));
+    /// assert_eq!(result.stdout.trim(), "output");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_non_zero(mut self, allow: bool) -> Self {
+        self.allow_non_zero = allow;
         self
     }
 
@@ -439,7 +472,7 @@ impl CmdLineRunner {
         let _ = stderr_ready.await;
         let _ = stdin_ready.await;
 
-        if status.success() {
+        if status.success() || self.allow_non_zero {
             if let Some(pr) = &self.pr {
                 pr.set_status(progress::ProgressStatus::Done);
             }
