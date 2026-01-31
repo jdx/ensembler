@@ -14,15 +14,19 @@ include = ["/LICENSE", "/README.md", "/src/**", "/examples/**"]
 name = "ensembler"
 path = "src/lib.rs"
 
+[features]
+default = ["progress"]
+progress = ["dep:clx"]
+
 [dependencies]
-clx = "<1"
+clx = { version = "<1", optional = true }
 console = "0.16"
 indexmap = "2"
 indicatif = "0.18"
 log = "0.4"
 terminal_size = "0.4"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "process", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-util = "0.7"
 
 [dev-dependencies]
@@ -31,3 +35,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal", "user"] }
+
+[[example]]
+name = "run"
+required-features = ["progress"]
