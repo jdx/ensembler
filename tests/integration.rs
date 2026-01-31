@@ -45,10 +45,10 @@ async fn test_stderr_capture() {
         .arg("-c")
         .arg("echo error >&2")
         .execute()
-        .await;
+        .await
+        .unwrap();
 
     // Command succeeds but has stderr output
-    let result = result.unwrap();
     assert!(result.status.success());
     assert_eq!(result.stderr.trim(), "error");
 }
@@ -75,14 +75,12 @@ async fn test_exit_code_failure() {
         .execute()
         .await;
 
-    assert!(result.is_err());
-    match result {
-        Err(Error::ScriptFailed(details)) => {
-            let (program, _args, _output, cmd_result) = *details;
-            assert_eq!(program, "bash");
-            assert_eq!(cmd_result.status.code(), Some(42));
-        }
-        _ => panic!("Expected ScriptFailed error"),
+    if let Err(Error::ScriptFailed(details)) = result {
+        let (program, _args, _output, cmd_result) = *details;
+        assert_eq!(program, "bash");
+        assert_eq!(cmd_result.status.code(), Some(42));
+    } else {
+        panic!("Expected ScriptFailed error, got {:?}", result);
     }
 }
 
@@ -228,8 +226,10 @@ async fn test_opt_arg_some() {
         .unwrap();
 
     assert!(result.status.success());
-    // -n suppresses newline, so stdout should not end with newline
-    assert_eq!(result.stdout, "no_newline\n"); // echo still adds newline in output capture
+    // Note: The library uses line-based reading which adds a newline after each line.
+    // Even though `echo -n` suppresses the trailing newline, the library's line reader
+    // adds one back. This is expected behavior for line-based output capture.
+    assert_eq!(result.stdout, "no_newline\n");
 }
 
 #[tokio::test]
@@ -251,11 +251,11 @@ async fn test_command_not_found() {
         .execute()
         .await;
 
-    assert!(result.is_err());
-    match result {
-        Err(Error::Io(_)) => {}
-        other => panic!("Expected Io error, got {:?}", other),
-    }
+    assert!(
+        matches!(result, Err(Error::Io(_))),
+        "Expected Io error, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -338,5 +338,7 @@ async fn test_newlines_in_output() {
         .unwrap();
 
     assert!(result.status.success());
+    // Note: printf outputs "a\nb\nc" without trailing newline, but the library's
+    // line-based reader adds a newline after the last line. This is expected behavior.
     assert_eq!(result.stdout, "a\nb\nc\n");
 }
