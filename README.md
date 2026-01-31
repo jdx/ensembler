@@ -23,6 +23,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 ## Usage
 
+> **Note:** Examples use Unix commands for clarity. On Windows, substitute equivalent
+> commands (e.g., `dir` for `ls`, `type` for `cat`, `timeout` for `sleep`).
+
 ### Basic Command Execution
 
 ```rust
