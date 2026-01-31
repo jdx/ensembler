@@ -7,7 +7,7 @@ homepage = "https://github.com/jdx/ensembler"
 documentation = "https://docs.rs/ensembler"
 license = "MIT"
 description = "A library for running commands and reporting progress"
-rust-version = "1.85"
+rust-version = "1.88.0"
 include = ["/LICENSE", "/README.md", "/src/**", "/examples/**"]
 
 [lib]
