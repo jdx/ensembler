@@ -14,6 +14,9 @@ pub enum Error {
 
     #[error("{} exited with non-zero status: {}\n{}", .0.0, render_exit_status(&.0.3), .0.2)]
     ScriptFailed(Box<(String, Vec<String>, String, CmdResult)>),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

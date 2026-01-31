@@ -65,7 +65,10 @@ impl CmdLineRunner {
 
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
-        let pids = RUNNING_PIDS.lock().unwrap();
+        let Ok(pids) = RUNNING_PIDS.lock() else {
+            debug!("Failed to acquire lock on RUNNING_PIDS");
+            return;
+        };
         for pid in pids.iter() {
             let pid = *pid as i32;
             trace!("{signal}: {pid}");
@@ -77,7 +80,10 @@ impl CmdLineRunner {
 
     #[cfg(windows)]
     pub fn kill_all() {
-        let pids = RUNNING_PIDS.lock().unwrap();
+        let Ok(pids) = RUNNING_PIDS.lock() else {
+            debug!("Failed to acquire lock on RUNNING_PIDS");
+            return;
+        };
         for pid in pids.iter() {
             if let Err(e) = Command::new("taskkill")
                 .arg("/F")
@@ -202,8 +208,19 @@ impl CmdLineRunner {
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
         let mut cp = self.cmd.spawn()?;
-        let id = cp.id().unwrap();
-        RUNNING_PIDS.lock().unwrap().insert(id);
+        let id = match cp.id() {
+            Some(id) => id,
+            None => {
+                let _ = cp.kill().await;
+                return Err(crate::Error::Internal("process has no id".to_string()));
+            }
+        };
+        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.insert(id)) {
+            let _ = cp.kill().await;
+            return Err(crate::Error::Internal(format!(
+                "failed to lock RUNNING_PIDS: {e}"
+            )));
+        }
         trace!("Started process: {id} for {}", self.program);
         if let Some(pr) = &self.pr {
             // pr.prop("bin", &self.program);
@@ -281,9 +298,22 @@ impl CmdLineRunner {
         }
         let (stdin_flush, stdin_ready) = oneshot::channel();
         if let Some(text) = self.stdin.take() {
-            let mut stdin = cp.stdin.take().unwrap();
+            let Some(mut stdin) = cp.stdin.take() else {
+                let _ = cp.kill().await;
+                if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+                    debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
+                }
+                if let Some(pr) = &self.pr {
+                    pr.set_status(progress::ProgressStatus::Failed);
+                }
+                return Err(crate::Error::Internal(
+                    "stdin was requested but not available".to_string(),
+                ));
+            };
             tokio::spawn(async move {
-                stdin.write_all(text.as_bytes()).await.unwrap();
+                if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                    debug!("Failed to write to stdin: {e}");
+                }
                 let _ = stdin_flush.send(());
             });
         } else {
@@ -299,7 +329,9 @@ impl CmdLineRunner {
                 }
             }
         };
-        RUNNING_PIDS.lock().unwrap().remove(&id);
+        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+            debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
+        }
         result.lock().await.status = status;
 
         // these are sent when the process has flushed IO
