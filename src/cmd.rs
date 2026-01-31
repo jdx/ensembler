@@ -51,7 +51,6 @@ pub struct CmdLineRunner {
     pr: Option<Arc<ProgressJob>>,
     stdin: Option<String>,
     redactions: IndexSet<String>,
-    pass_signals: bool,
     show_stderr_on_error: bool,
     stderr_to_progress: bool,
     cancel: CancellationToken,
@@ -86,7 +85,6 @@ impl CmdLineRunner {
             pr: None,
             stdin: None,
             redactions: Default::default(),
-            pass_signals: false,
             show_stderr_on_error: true,
             stderr_to_progress: false,
             cancel: CancellationToken::new(),
@@ -341,14 +339,6 @@ impl CmdLineRunner {
         self
     }
 
-    /// Enables passing signals to the child process.
-    ///
-    /// Note: This feature is not yet implemented.
-    pub fn with_pass_signals(&mut self) -> &mut Self {
-        self.pass_signals = true;
-        self
-    }
-
     /// Pipes a string to the command's stdin.
     ///
     /// This automatically configures stdin to be piped.
@@ -386,8 +376,6 @@ impl CmdLineRunner {
         }
         trace!("Started process: {id} for {}", self.program);
         if let Some(pr) = &self.pr {
-            // pr.prop("bin", &self.program);
-            // pr.prop("args", &self.args);
             pr.prop("ensembler_cmd", &self.to_string());
             pr.prop("ensembler_stdout", &"".to_string());
             pr.set_status(progress::ProgressStatus::Running);
