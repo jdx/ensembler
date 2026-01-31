@@ -300,6 +300,12 @@ impl CmdLineRunner {
         if let Some(text) = self.stdin.take() {
             let Some(mut stdin) = cp.stdin.take() else {
                 let _ = cp.kill().await;
+                if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+                    debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
+                }
+                if let Some(pr) = &self.pr {
+                    pr.set_status(progress::ProgressStatus::Failed);
+                }
                 return Err(crate::Error::Internal(
                     "stdin was requested but not available".to_string(),
                 ));
