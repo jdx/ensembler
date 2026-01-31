@@ -103,6 +103,7 @@ async fn test_redaction_stdout() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Windows echo includes quotes around args with spaces
 async fn test_redaction_multiple() {
     let result = CmdLineRunner::new("echo")
         .arg("secret1 and secret2")
@@ -334,6 +335,7 @@ async fn test_error_message_contains_program_name() {
 }
 
 #[tokio::test]
+#[cfg(unix)] // Windows echo includes quotes around args with spaces
 async fn test_special_characters_in_args() {
     let result = CmdLineRunner::new("echo")
         .arg("hello world")
