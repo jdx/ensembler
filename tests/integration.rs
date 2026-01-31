@@ -1,5 +1,5 @@
 use ensembler::{CmdLineRunner, CmdResult, Error};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -367,6 +367,7 @@ async fn test_newlines_in_output() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_allow_non_zero() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
@@ -382,6 +383,7 @@ async fn test_allow_non_zero() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn test_allow_non_zero_false() {
     // Default behavior: non-zero exit is an error
     let result = CmdLineRunner::new("bash")
@@ -392,4 +394,41 @@ async fn test_allow_non_zero_false() {
         .await;
 
     assert!(matches!(result, Err(Error::ScriptFailed(_))));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_timeout() {
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sleep")
+        .arg("10")
+        .timeout(Duration::from_millis(100))
+        .execute()
+        .await;
+
+    let elapsed = start.elapsed();
+
+    // Should have timed out with specific error type
+    assert!(
+        matches!(result, Err(Error::TimedOut)),
+        "Expected TimedOut error, got {:?}",
+        result
+    );
+
+    // Should have returned quickly (well under 10 seconds)
+    assert!(elapsed < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn test_timeout_not_reached() {
+    // Command completes before timeout
+    let result = CmdLineRunner::new("echo")
+        .arg("fast")
+        .timeout(Duration::from_secs(10))
+        .execute()
+        .await
+        .unwrap();
+
+    assert!(result.status.success());
+    assert_eq!(result.stdout.trim(), "fast");
 }

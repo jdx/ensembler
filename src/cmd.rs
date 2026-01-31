@@ -5,6 +5,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::{
     io::BufReader,
@@ -55,6 +56,7 @@ pub struct CmdLineRunner {
     stderr_to_progress: bool,
     cancel: CancellationToken,
     allow_non_zero: bool,
+    timeout: Option<Duration>,
 }
 
 static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
@@ -89,6 +91,7 @@ impl CmdLineRunner {
             stderr_to_progress: false,
             cancel: CancellationToken::new(),
             allow_non_zero: false,
+            timeout: None,
         }
     }
 
@@ -243,6 +246,33 @@ impl CmdLineRunner {
     /// ```
     pub fn allow_non_zero(mut self, allow: bool) -> Self {
         self.allow_non_zero = allow;
+        self
+    }
+
+    /// Sets a timeout for the command.
+    ///
+    /// If the command does not complete within the specified duration,
+    /// it will be killed and [`Error::TimedOut`] will be returned.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ensembler::CmdLineRunner;
+    /// use std::time::Duration;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let result = CmdLineRunner::new("sleep")
+    ///     .arg("60")
+    ///     .timeout(Duration::from_secs(1))
+    ///     .execute()
+    ///     .await;
+    ///
+    /// assert!(result.is_err()); // TimedOut error
+    /// # }
+    /// ```
+    pub fn timeout(mut self, duration: Duration) -> Self {
+        self.timeout = Some(duration);
         self
     }
 
@@ -452,16 +482,37 @@ impl CmdLineRunner {
         } else {
             drop(stdin_flush);
         }
+
+        // Create timeout future that either sleeps or waits forever
+        let timeout_fut = async {
+            if let Some(duration) = self.timeout {
+                tokio::time::sleep(duration).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(timeout_fut);
+
+        let mut timed_out = false;
         let mut was_cancelled = false;
         let status = loop {
+            // Use biased select to prioritize process completion over timeout/cancellation.
+            // This prevents a race where if process completes at the same instant as timeout,
+            // we'd incorrectly report a timeout instead of success.
             select! {
+                biased;
+                status = cp.wait() => {
+                    break status?;
+                }
+                _ = &mut timeout_fut => {
+                    timed_out = true;
+                    // Ignore kill error if process already exited
+                    let _ = cp.kill().await;
+                }
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
                     // Ignore kill error if process already exited
                     let _ = cp.kill().await;
-                }
-                status = cp.wait() => {
-                    break status?;
                 }
             }
         };
@@ -474,6 +525,13 @@ impl CmdLineRunner {
                 pr.set_status(progress::ProgressStatus::Failed);
             }
             return Err(crate::Error::Cancelled);
+        }
+
+        if timed_out {
+            if let Some(pr) = &self.pr {
+                pr.set_status(progress::ProgressStatus::Failed);
+            }
+            return Err(crate::Error::TimedOut);
         }
 
         result.lock().await.status = status;

@@ -28,6 +28,10 @@ pub enum Error {
     #[error("command was cancelled")]
     Cancelled,
 
+    /// The command timed out.
+    #[error("command timed out")]
+    TimedOut,
+
     #[error("internal error: {0}")]
     Internal(String),
 }
