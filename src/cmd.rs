@@ -53,7 +53,9 @@ pub struct CmdLineRunner {
     pr: Option<Arc<ProgressJob>>,
     stdin: Option<String>,
     redactions: IndexSet<String>,
+    #[cfg(feature = "progress")]
     show_stderr_on_error: bool,
+    #[cfg(feature = "progress")]
     stderr_to_progress: bool,
     cancel: CancellationToken,
     allow_non_zero: bool,
@@ -88,7 +90,9 @@ impl CmdLineRunner {
             pr: None,
             stdin: None,
             redactions: Default::default(),
+            #[cfg(feature = "progress")]
             show_stderr_on_error: true,
+            #[cfg(feature = "progress")]
             stderr_to_progress: false,
             cancel: CancellationToken::new(),
             allow_non_zero: false,
@@ -208,6 +212,9 @@ impl CmdLineRunner {
     /// Controls whether stderr is displayed when the command fails.
     ///
     /// Defaults to `true`.
+    ///
+    /// This method is only available when the `progress` feature is enabled.
+    #[cfg(feature = "progress")]
     pub fn show_stderr_on_error(mut self, show: bool) -> Self {
         self.show_stderr_on_error = show;
         self
@@ -217,6 +224,9 @@ impl CmdLineRunner {
     ///
     /// When enabled, stderr lines update the progress bar's status.
     /// When disabled (default), stderr is printed above the progress bar.
+    ///
+    /// This method is only available when the `progress` feature is enabled.
+    #[cfg(feature = "progress")]
     pub fn stderr_to_progress(mut self, enable: bool) -> Self {
         self.stderr_to_progress = enable;
         self
