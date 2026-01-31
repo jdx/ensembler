@@ -20,6 +20,29 @@ use std::sync::LazyLock as Lazy;
 use crate::Error::ScriptFailed;
 use clx::progress::{self, ProgressJob};
 
+/// A builder for executing external commands with advanced output handling.
+///
+/// `CmdLineRunner` provides a fluent API for configuring and executing external
+/// commands. It supports output capture, secret redaction, progress bar integration,
+/// and cancellation.
+///
+/// # Example
+///
+/// ```no_run
+/// use ensembler::CmdLineRunner;
+///
+/// #[tokio::main]
+/// async fn main() -> ensembler::Result<()> {
+///     let result = CmdLineRunner::new("ls")
+///         .arg("-la")
+///         .current_dir("/tmp")
+///         .execute()
+///         .await?;
+///
+///     println!("{}", result.stdout);
+///     Ok(())
+/// }
+/// ```
 pub struct CmdLineRunner {
     cmd: Command,
     program: String,
@@ -36,6 +59,10 @@ pub struct CmdLineRunner {
 static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
 
 impl CmdLineRunner {
+    /// Creates a new command runner for the given program.
+    ///
+    /// On Windows, commands are automatically wrapped with `cmd.exe /c`.
+    /// The command is configured with piped stdout/stderr and null stdin by default.
     pub fn new<P: AsRef<OsStr>>(program: P) -> Self {
         let program = program.as_ref().to_string_lossy().to_string();
         let mut cmd = if cfg!(windows) {
@@ -63,6 +90,10 @@ impl CmdLineRunner {
         }
     }
 
+    /// Sends a signal to all running child processes.
+    ///
+    /// This is useful for graceful shutdown scenarios where you need to
+    /// terminate all spawned processes.
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
         let Ok(pids) = RUNNING_PIDS.lock() else {
@@ -78,6 +109,9 @@ impl CmdLineRunner {
         }
     }
 
+    /// Terminates all running child processes on Windows.
+    ///
+    /// Uses `taskkill /F /T` to forcefully terminate process trees.
     #[cfg(windows)]
     pub fn kill_all() {
         let Ok(pids) = RUNNING_PIDS.lock() else {
@@ -97,21 +131,47 @@ impl CmdLineRunner {
         }
     }
 
+    /// Configures stdin handling for the command.
     pub fn stdin<T: Into<Stdio>>(mut self, cfg: T) -> Self {
         self.cmd.stdin(cfg);
         self
     }
 
+    /// Configures stdout handling for the command.
     pub fn stdout<T: Into<Stdio>>(mut self, cfg: T) -> Self {
         self.cmd.stdout(cfg);
         self
     }
 
+    /// Configures stderr handling for the command.
     pub fn stderr<T: Into<Stdio>>(mut self, cfg: T) -> Self {
         self.cmd.stderr(cfg);
         self
     }
 
+    /// Adds strings to redact from command output.
+    ///
+    /// Any occurrence of these strings in stdout or stderr will be replaced
+    /// with `[redacted]`. This is useful for hiding sensitive data like
+    /// API keys or passwords.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ensembler::CmdLineRunner;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> ensembler::Result<()> {
+    /// let result = CmdLineRunner::new("echo")
+    ///     .arg("secret-api-key")
+    ///     .redact(vec!["secret-api-key".to_string()])
+    ///     .execute()
+    ///     .await?;
+    ///
+    /// assert_eq!(result.stdout.trim(), "[redacted]");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn redact(mut self, redactions: impl IntoIterator<Item = String>) -> Self {
         for r in redactions {
             self.redactions.insert(r);
@@ -119,36 +179,53 @@ impl CmdLineRunner {
         self
     }
 
+    /// Attaches a progress bar to display command status.
+    ///
+    /// The progress bar will be updated with the command being run and
+    /// its output. Uses the `clx` crate's progress bar system.
     pub fn with_pr(mut self, pr: Arc<ProgressJob>) -> Self {
         self.pr = Some(pr);
         self
     }
 
+    /// Sets a cancellation token for the command.
+    ///
+    /// When the token is cancelled, the running process will be killed.
     pub fn with_cancel_token(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
         self
     }
 
+    /// Controls whether stderr is displayed when the command fails.
+    ///
+    /// Defaults to `true`.
     pub fn show_stderr_on_error(mut self, show: bool) -> Self {
         self.show_stderr_on_error = show;
         self
     }
 
+    /// Routes stderr to the progress bar instead of printing it directly.
+    ///
+    /// When enabled, stderr lines update the progress bar's status.
+    /// When disabled (default), stderr is printed above the progress bar.
     pub fn stderr_to_progress(mut self, enable: bool) -> Self {
         self.stderr_to_progress = enable;
         self
     }
 
+    /// Sets the working directory for the command.
     pub fn current_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.cmd.current_dir(dir);
         self
     }
 
+    /// Clears all environment variables for the command.
     pub fn env_clear(mut self) -> Self {
         self.cmd.env_clear();
         self
     }
 
+    /// Sets an environment variable for the command.
     pub fn env<K, V>(mut self, key: K, val: V) -> Self
     where
         K: AsRef<OsStr>,
@@ -157,6 +234,8 @@ impl CmdLineRunner {
         self.cmd.env(key, val);
         self
     }
+
+    /// Sets multiple environment variables for the command.
     pub fn envs<I, K, V>(mut self, vars: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -167,6 +246,9 @@ impl CmdLineRunner {
         self
     }
 
+    /// Adds an optional argument to the command.
+    ///
+    /// If `arg` is `None`, no argument is added.
     pub fn opt_arg<S: AsRef<OsStr>>(mut self, arg: Option<S>) -> Self {
         if let Some(arg) = arg {
             self.cmd.arg(arg);
@@ -174,12 +256,14 @@ impl CmdLineRunner {
         self
     }
 
+    /// Adds a single argument to the command.
     pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
         self.cmd.arg(arg.as_ref());
         self.args.push(arg.as_ref().to_string_lossy().to_string());
         self
     }
 
+    /// Adds multiple arguments to the command.
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -194,17 +278,33 @@ impl CmdLineRunner {
         self
     }
 
+    /// Enables passing signals to the child process.
+    ///
+    /// Note: This feature is not yet implemented.
     pub fn with_pass_signals(&mut self) -> &mut Self {
         self.pass_signals = true;
         self
     }
 
+    /// Pipes a string to the command's stdin.
+    ///
+    /// This automatically configures stdin to be piped.
     pub fn stdin_string(mut self, input: impl Into<String>) -> Self {
         self.cmd.stdin(Stdio::piped());
         self.stdin = Some(input.into());
         self
     }
 
+    /// Executes the command and waits for it to complete.
+    ///
+    /// Returns [`CmdResult`] containing captured stdout, stderr, and exit status
+    /// on success. Returns an error if the command fails to start or exits with
+    /// a non-zero status.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Io`] if the command fails to start
+    /// - [`Error::ScriptFailed`] if the command exits with a non-zero status
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
         let mut cp = self.cmd.spawn()?;
@@ -387,10 +487,17 @@ impl Debug for CmdLineRunner {
     }
 }
 
+/// The result of executing a command.
+///
+/// Contains the captured output streams and exit status.
 #[derive(Debug, Default, Clone)]
 pub struct CmdResult {
+    /// The captured standard output.
     pub stdout: String,
+    /// The captured standard error.
     pub stderr: String,
+    /// Combined stdout and stderr in the order they were received.
     pub combined_output: String,
+    /// The exit status of the process.
     pub status: ExitStatus,
 }
