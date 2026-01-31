@@ -383,6 +383,22 @@ impl CmdLineRunner {
     /// - [`Error::ScriptFailed`] if the command exits with a non-zero status
     pub async fn execute(mut self) -> Result<CmdResult> {
         debug!("$ {self}");
+
+        // Build Aho-Corasick automaton for efficient multi-pattern redaction
+        // This is done before spawning to avoid orphan processes on build failure
+        let redactor: Option<Arc<Redactor>> = if self.redactions.is_empty() {
+            None
+        } else {
+            let automaton = AhoCorasick::new(self.redactions.iter()).map_err(|e| {
+                crate::Error::Internal(format!("failed to build redaction matcher: {e}"))
+            })?;
+            let replacements = vec!["[redacted]"; self.redactions.len()];
+            Some(Arc::new(Redactor {
+                automaton,
+                replacements,
+            }))
+        };
+
         let mut cp = self.cmd.spawn()?;
         let id = match cp.id() {
             Some(id) => id,
@@ -406,20 +422,6 @@ impl CmdLineRunner {
         }
         let result = Arc::new(Mutex::new(CmdResult::default()));
         let combined_output = Arc::new(Mutex::new(Vec::new()));
-
-        // Build Aho-Corasick automaton for efficient multi-pattern redaction
-        let redactor: Option<Arc<Redactor>> = if self.redactions.is_empty() {
-            None
-        } else {
-            let automaton = AhoCorasick::new(self.redactions.iter()).map_err(|e| {
-                crate::Error::Internal(format!("failed to build redaction matcher: {e}"))
-            })?;
-            let replacements = vec!["[redacted]"; self.redactions.len()];
-            Some(Arc::new(Redactor {
-                automaton,
-                replacements,
-            }))
-        };
 
         let (stdout_flush, stdout_ready) = oneshot::channel();
         if let Some(stdout) = cp.stdout.take() {
