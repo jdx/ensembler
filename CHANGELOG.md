@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.1](https://github.com/jdx/ensembler/compare/v1.0.0...v1.0.1) - 2026-02-21
+
+### Other
+
+- *(deps)* bump clx from <1 to 1 ([#70](https://github.com/jdx/ensembler/pull/70))
+
 ## [1.0.0] - 2026-01-31
 
 ### Added
