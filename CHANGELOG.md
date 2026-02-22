@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.2](https://github.com/jdx/ensembler/compare/v1.0.1...v1.0.2) - 2026-02-22
+
+### Fixed
+
+- make execute() future Send and use process groups for clean kills ([#71](https://github.com/jdx/ensembler/pull/71))
+
 ## [1.0.1](https://github.com/jdx/ensembler/compare/v1.0.0...v1.0.1) - 2026-02-21
 
 ### Other
