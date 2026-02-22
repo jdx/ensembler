@@ -107,10 +107,11 @@ impl CmdLineRunner {
         }
     }
 
-    /// Sends a signal to all running child processes.
+    /// Sends a signal to all running child process groups.
     ///
-    /// This is useful for graceful shutdown scenarios where you need to
-    /// terminate all spawned processes.
+    /// Each child is placed in its own process group at spawn time, so this
+    /// kills the entire process tree (not just the direct child).
+    /// This is useful for graceful shutdown scenarios.
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
         let Ok(pids) = RUNNING_PIDS.lock() else {
@@ -118,10 +119,10 @@ impl CmdLineRunner {
             return;
         };
         for pid in pids.iter() {
-            let pid = *pid as i32;
-            trace!("{signal}: {pid}");
-            if let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
-                debug!("Failed to kill cmd {pid}: {e}");
+            let pgid = nix::unistd::Pid::from_raw(*pid as i32);
+            trace!("{signal}: pgid {pid}");
+            if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
+                debug!("Failed to kill process group {pid}: {e}");
             }
         }
     }
@@ -399,6 +400,11 @@ impl CmdLineRunner {
             }))
         };
 
+        // Put the child in its own process group so we can kill the entire
+        // tree on timeout/cancellation (not just the direct child).
+        #[cfg(unix)]
+        self.cmd.process_group(0);
+
         let mut cp = self.cmd.spawn()?;
         let id = match cp.id() {
             Some(id) => id,
@@ -407,7 +413,11 @@ impl CmdLineRunner {
                 return Err(crate::Error::Internal("process has no id".to_string()));
             }
         };
-        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.insert(id)) {
+        if let Err(e) = RUNNING_PIDS
+            .lock()
+            .map(|mut pids| pids.insert(id))
+            .map_err(|e| e.to_string())
+        {
             let _ = cp.kill().await;
             return Err(crate::Error::Internal(format!(
                 "failed to lock RUNNING_PIDS: {e}"
@@ -498,7 +508,11 @@ impl CmdLineRunner {
         if let Some(text) = self.stdin.take() {
             let Some(mut stdin) = cp.stdin.take() else {
                 let _ = cp.kill().await;
-                if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+                if let Err(e) = RUNNING_PIDS
+                    .lock()
+                    .map(|mut pids| pids.remove(&id))
+                    .map_err(|e| e.to_string())
+                {
                     debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
                 }
                 #[cfg(feature = "progress")]
@@ -542,17 +556,23 @@ impl CmdLineRunner {
                 }
                 _ = &mut timeout_fut => {
                     timed_out = true;
-                    // Ignore kill error if process already exited
+                    #[cfg(unix)]
+                    kill_process_group(id);
                     let _ = cp.kill().await;
                 }
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
-                    // Ignore kill error if process already exited
+                    #[cfg(unix)]
+                    kill_process_group(id);
                     let _ = cp.kill().await;
                 }
             }
         };
-        if let Err(e) = RUNNING_PIDS.lock().map(|mut pids| pids.remove(&id)) {
+        if let Err(e) = RUNNING_PIDS
+            .lock()
+            .map(|mut pids| pids.remove(&id))
+            .map_err(|e| e.to_string())
+        {
             debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
         }
 
@@ -608,6 +628,16 @@ impl CmdLineRunner {
             output,
             result,
         ))))?
+    }
+}
+
+/// Kill an entire process group by PGID (which equals the child PID since
+/// we spawn with process_group(0)).
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let pgid = nix::unistd::Pid::from_raw(pid as i32);
+    if let Err(e) = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL) {
+        debug!("Failed to kill process group {pid}: {e}");
     }
 }
 
