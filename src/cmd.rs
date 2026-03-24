@@ -63,6 +63,32 @@ impl CmdLineRunner {
         }
     }
 
+    /// Creates a command runner that executes the program directly.
+    ///
+    /// Unlike [`Self::new`], this does not add the default Windows
+    /// `cmd.exe /c` wrapper. Callers can use this when they need to build
+    /// an explicit shell invocation themselves.
+    pub fn direct<P: AsRef<OsStr>>(program: P) -> Self {
+        let program = program.as_ref().to_string_lossy().to_string();
+        let mut cmd = Command::new(&program);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        Self {
+            cmd,
+            program,
+            args: vec![],
+            pr: None,
+            stdin: None,
+            redactions: Default::default(),
+            pass_signals: false,
+            show_stderr_on_error: true,
+            stderr_to_progress: false,
+            cancel: CancellationToken::new(),
+        }
+    }
+
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
         let pids = RUNNING_PIDS.lock().unwrap();
@@ -174,6 +200,25 @@ impl CmdLineRunner {
         self
     }
 
+    /// Adds a raw command-line segment.
+    ///
+    /// On Windows this uses `CommandExt::raw_arg` so caller-provided quoting
+    /// is preserved. On other platforms it behaves like `arg`.
+    pub fn raw_arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.cmd.raw_arg(arg.as_ref());
+        }
+        #[cfg(not(windows))]
+        {
+            self.cmd.arg(arg.as_ref());
+        }
+        self.args.push(arg.as_ref().to_string_lossy().to_string());
+        self
+    }
+
+    /// Adds multiple arguments to the command.
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -354,6 +399,26 @@ impl Debug for CmdLineRunner {
         write!(f, "{} {args}", self.program)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_direct_uses_direct_program() {
+        let runner = CmdLineRunner::direct("echo");
+        assert!(format!("{runner}").starts_with("echo"));
+    }
+
+    #[test]
+    fn test_raw_arg_records_argument() {
+        let runner = CmdLineRunner::direct("cmd.exe")
+            .arg("/c")
+            .raw_arg(r#""a b""#);
+        assert!(format!("{runner}").contains(r#""a b""#));
+    }
+}
+
 
 #[derive(Debug, Default, Clone)]
 pub struct CmdResult {
