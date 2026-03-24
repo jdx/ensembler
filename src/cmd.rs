@@ -107,6 +107,36 @@ impl CmdLineRunner {
         }
     }
 
+    /// Creates a command runner that executes the program directly.
+    ///
+    /// Unlike [`Self::new`], this does not add the default Windows
+    /// `cmd.exe /c` wrapper. Callers can use this when they need to build
+    /// an explicit shell invocation themselves.
+    pub fn direct<P: AsRef<OsStr>>(program: P) -> Self {
+        let program = program.as_ref().to_string_lossy().to_string();
+        let mut cmd = Command::new(&program);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        Self {
+            cmd,
+            program,
+            args: vec![],
+            #[cfg(feature = "progress")]
+            pr: None,
+            stdin: None,
+            redactions: Default::default(),
+            #[cfg(feature = "progress")]
+            show_stderr_on_error: true,
+            #[cfg(feature = "progress")]
+            stderr_to_progress: false,
+            cancel: CancellationToken::new(),
+            allow_non_zero: false,
+            timeout: None,
+        }
+    }
+
     /// Sends a signal to all running child process groups.
     ///
     /// Each child is placed in its own process group at spawn time, so this
@@ -344,6 +374,24 @@ impl CmdLineRunner {
     /// Adds a single argument to the command.
     pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
         self.cmd.arg(arg.as_ref());
+        self.args.push(arg.as_ref().to_string_lossy().to_string());
+        self
+    }
+
+    /// Adds a raw command-line segment.
+    ///
+    /// On Windows this uses `CommandExt::raw_arg` so caller-provided quoting
+    /// is preserved. On other platforms it behaves like `arg`.
+    pub fn raw_arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.cmd.raw_arg(arg.as_ref());
+        }
+        #[cfg(not(windows))]
+        {
+            self.cmd.arg(arg.as_ref());
+        }
         self.args.push(arg.as_ref().to_string_lossy().to_string());
         self
     }
@@ -662,6 +710,25 @@ impl Debug for CmdLineRunner {
 /// The result of executing a command.
 ///
 /// Contains the captured output streams and exit status.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_direct_uses_direct_program() {
+        let runner = CmdLineRunner::direct("echo");
+        assert!(format!("{runner}").starts_with("echo"));
+    }
+
+    #[test]
+    fn test_raw_arg_records_argument() {
+        let runner = CmdLineRunner::direct("cmd.exe")
+            .arg("/c")
+            .raw_arg(r#""a b""#);
+        assert!(format!("{runner}").contains(r#""a b""#));
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct CmdResult {
     /// The captured standard output.
