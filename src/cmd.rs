@@ -38,13 +38,26 @@ static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::d
 impl CmdLineRunner {
     pub fn new<P: AsRef<OsStr>>(program: P) -> Self {
         let program = program.as_ref().to_string_lossy().to_string();
-        let mut cmd = if cfg!(windows) {
+        let cmd = if cfg!(windows) {
             let mut cmd = Command::new("cmd.exe");
             cmd.arg("/c").arg(&program);
             cmd
         } else {
             Command::new(&program)
         };
+        Self::init(cmd, program)
+    }
+
+    /// Create a runner that invokes `program` directly, bypassing the
+    /// Windows auto-wrap in `cmd.exe /c`. Use this when you need precise
+    /// control over the command line (e.g. to pair with [`raw_arg`]).
+    pub fn new_direct<P: AsRef<OsStr>>(program: P) -> Self {
+        let program = program.as_ref().to_string_lossy().to_string();
+        let cmd = Command::new(&program);
+        Self::init(cmd, program)
+    }
+
+    fn init(mut cmd: Command, program: String) -> Self {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -171,6 +184,31 @@ impl CmdLineRunner {
     pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
         self.cmd.arg(arg.as_ref());
         self.args.push(arg.as_ref().to_string_lossy().to_string());
+        self
+    }
+
+    /// Append a raw, unescaped fragment to the command line on Windows.
+    ///
+    /// Rust's `Command::arg` applies MSVCRT-style argv escaping on Windows,
+    /// which collides with `cmd.exe`'s own parsing rules and mangles strings
+    /// that already contain cmd-appropriate quoting. This method uses
+    /// `CommandExt::raw_arg` to append the string verbatim so shell-quoted
+    /// payloads (like rendered `{{files}}` values) survive intact.
+    ///
+    /// On non-Windows platforms this falls back to a regular `arg`.
+    #[allow(unused_mut)]
+    pub fn raw_arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
+        let s = arg.as_ref().to_string_lossy().to_string();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.cmd.as_std_mut().raw_arg(&s);
+        }
+        #[cfg(not(windows))]
+        {
+            self.cmd.arg(arg.as_ref());
+        }
+        self.args.push(s);
         self
     }
 
