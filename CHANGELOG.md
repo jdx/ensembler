@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.0](https://github.com/jdx/ensembler/compare/v1.0.2...v1.1.0) - 2026-04-12
+
+### Added
+
+- *(cmd)* add new_direct and raw_arg for Windows quoting ([#89](https://github.com/jdx/ensembler/pull/89))
+
 ## [1.0.2](https://github.com/jdx/ensembler/compare/v1.0.1...v1.0.2) - 2026-02-22
 
 ### Fixed
