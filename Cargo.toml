@@ -40,3 +40,6 @@ nix = { version = "0.31", features = ["signal", "user"] }
 [[example]]
 name = "run"
 required-features = ["progress"]
+
+[profile.dev]
+debug = 1
