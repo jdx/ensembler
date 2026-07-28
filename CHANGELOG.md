@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.3](https://github.com/jdx/ensembler/compare/v1.1.2...v1.1.3) - 2026-07-28
+
+### Fixed
+
+- *(deps)* update rust crate clx to v3 ([#121](https://github.com/jdx/ensembler/pull/121))
+
 ## [1.1.2](https://github.com/jdx/ensembler/compare/v1.1.1...v1.1.2) - 2026-05-03
 
 ### Other
