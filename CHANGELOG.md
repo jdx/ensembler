@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.5](https://github.com/jdx/ensembler/compare/v1.1.4...v1.1.5) - 2026-09-27
+
+### Fixed
+
+- keep carriage returns in a failed command's error output ([#136](https://github.com/jdx/ensembler/pull/136))
+
 ## [1.1.4](https://github.com/jdx/ensembler/compare/v1.1.3...v1.1.4) - 2026-09-27
 
 ### Fixed
