@@ -29,6 +29,33 @@ struct Redactor {
     replacements: Vec<&'static str>,
 }
 
+/// Reads the next line from `reader`, returning it without its terminator,
+/// along with the terminator to put back: `"\r\n"` if the line ended with one,
+/// otherwise `"\n"`.
+///
+/// Carriage returns are kept so captured output matches what the command wrote,
+/// which matters for output such as a patch to a file with CRLF line endings.
+/// Invalid UTF-8 is replaced rather than ending the stream early.
+async fn next_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> Option<(String, &'static str)> {
+    buf.clear();
+    match reader.read_until(b'\n', buf).await {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    let mut ending = "\n";
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+            ending = "\r\n";
+        }
+    }
+    Some((String::from_utf8_lossy(buf).into_owned(), ending))
+}
+
 /// A builder for executing external commands with advanced output handling.
 ///
 /// `CmdLineRunner` provides a fluent API for configuring and executing external
@@ -479,18 +506,18 @@ impl CmdLineRunner {
             #[cfg(feature = "progress")]
             let pr = self.pr.clone();
             tokio::spawn(async move {
-                let stdout = BufReader::new(stdout);
-                let mut lines = stdout.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                let mut stdout = BufReader::new(stdout);
+                let mut buf = Vec::new();
+                while let Some((line, ending)) = next_line(&mut stdout, &mut buf).await {
                     let line = match &redactor {
                         Some(r) => r.automaton.replace_all(&line, &r.replacements),
                         None => line,
                     };
                     let mut result = result.lock().await;
                     result.stdout += &line;
-                    result.stdout += "\n";
+                    result.stdout += ending;
                     result.combined_output += &line;
-                    result.combined_output += "\n";
+                    result.combined_output += ending;
                     #[cfg(feature = "progress")]
                     if let Some(pr) = &pr {
                         pr.prop("ensembler_stdout", &line);
@@ -512,18 +539,18 @@ impl CmdLineRunner {
             #[cfg(feature = "progress")]
             let stderr_to_progress = self.stderr_to_progress;
             tokio::spawn(async move {
-                let stderr = BufReader::new(stderr);
-                let mut lines = stderr.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                let mut stderr = BufReader::new(stderr);
+                let mut buf = Vec::new();
+                while let Some((line, ending)) = next_line(&mut stderr, &mut buf).await {
                     let line = match &redactor {
                         Some(r) => r.automaton.replace_all(&line, &r.replacements),
                         None => line,
                     };
                     let mut result = result.lock().await;
                     result.stderr += &line;
-                    result.stderr += "\n";
+                    result.stderr += ending;
                     result.combined_output += &line;
-                    result.combined_output += "\n";
+                    result.combined_output += ending;
                     #[cfg(feature = "progress")]
                     if let Some(pr) = &pr {
                         if stderr_to_progress {
