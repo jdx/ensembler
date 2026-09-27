@@ -42,6 +42,44 @@ async fn test_stdout_capture() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn test_stdout_keeps_carriage_returns() {
+    let result = CmdLineRunner::new("printf")
+        .arg("one\\r\\ntwo\\nthree\\r\\n")
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(result.stdout, "one\r\ntwo\nthree\r\n");
+    assert_eq!(result.combined_output, "one\r\ntwo\nthree\r\n");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_stderr_keeps_carriage_returns() {
+    let result = CmdLineRunner::new("bash")
+        .arg("-c")
+        .arg("printf 'one\\r\\ntwo\\n' >&2")
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(result.stderr, "one\r\ntwo\n");
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_output_after_invalid_utf8_is_kept() {
+    let result = CmdLineRunner::new("printf")
+        .arg("bad \\377\\nafter\\n")
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(result.stdout, "bad \u{FFFD}\nafter\n");
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn test_stderr_capture() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")
