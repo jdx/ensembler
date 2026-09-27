@@ -80,6 +80,52 @@ async fn test_output_after_invalid_utf8_is_kept() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn test_failure_output_keeps_carriage_returns() {
+    let result = CmdLineRunner::new("bash")
+        .arg("-c")
+        .arg("printf 'one\\r\\ntwo\\r\\n'; exit 1")
+        .execute()
+        .await;
+
+    let Err(Error::ScriptFailed(details)) = result else {
+        panic!("Expected ScriptFailed error, got {result:?}");
+    };
+    let (_program, _args, output, cmd_result) = *details;
+    assert_eq!(output, "one\r\ntwo");
+    assert_eq!(cmd_result.stdout, "one\r\ntwo\r\n");
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn test_stdout_keeps_carriage_returns_on_windows() {
+    // cmd's echo ends each line with \r\n.
+    let result = CmdLineRunner::new("cmd")
+        .args(["/C", "echo one& echo two"])
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(result.stdout, "one\r\ntwo\r\n");
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn test_failure_output_keeps_carriage_returns_on_windows() {
+    let result = CmdLineRunner::new("cmd")
+        .args(["/C", "echo one& echo two& exit /b 1"])
+        .execute()
+        .await;
+
+    let Err(Error::ScriptFailed(details)) = result else {
+        panic!("Expected ScriptFailed error, got {result:?}");
+    };
+    let (_program, _args, output, cmd_result) = *details;
+    assert_eq!(output, "one\r\ntwo");
+    assert_eq!(cmd_result.stdout, "one\r\ntwo\r\n");
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn test_stderr_capture() {
     let result = CmdLineRunner::new("bash")
         .arg("-c")

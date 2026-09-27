@@ -523,7 +523,7 @@ impl CmdLineRunner {
                         pr.prop("ensembler_stdout", &line);
                         pr.update();
                     }
-                    combined_output.lock().await.push(line);
+                    combined_output.lock().await.push(format!("{line}{ending}"));
                 }
                 let _ = stdout_flush.send(());
             });
@@ -562,7 +562,7 @@ impl CmdLineRunner {
                             pr.println(&line);
                         }
                     }
-                    combined_output.lock().await.push(line);
+                    combined_output.lock().await.push(format!("{line}{ending}"));
                 }
                 let _ = stderr_flush.send(());
             });
@@ -671,7 +671,9 @@ impl CmdLineRunner {
             }
         } else {
             let result = result.lock().await.to_owned();
-            self.on_error(combined_output.lock().await.join("\n"), result)?;
+            // Each line keeps its own terminator, so a `\r\n` survives here as
+            // it does in `CmdResult`.
+            self.on_error(combined_output.lock().await.concat(), result)?;
         }
 
         let result = result.lock().await.to_owned();
