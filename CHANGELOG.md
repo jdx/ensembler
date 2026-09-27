@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.4](https://github.com/jdx/ensembler/compare/v1.1.3...v1.1.4) - 2026-09-27
+
+### Fixed
+
+- keep carriage returns and invalid UTF-8 lines in captured output ([#134](https://github.com/jdx/ensembler/pull/134))
+
 ## [1.1.3](https://github.com/jdx/ensembler/compare/v1.1.2...v1.1.3) - 2026-07-28
 
 ### Fixed
