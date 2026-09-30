@@ -1,4 +1,10 @@
 use ensembler::{CmdLineRunner, CmdResult, Error};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::IsTerminal;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::unix::process::CommandExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -515,4 +521,166 @@ async fn test_timeout_not_reached() {
 
     assert!(result.status.success());
     assert_eq!(result.stdout.trim(), "fast");
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn test_interactive_terminal_control() {
+    const DRIVER: &str = "ENSEMBLER_INTERACTIVE_TEST_DRIVER";
+    const CHILD: &str = "ENSEMBLER_INTERACTIVE_TEST_CHILD";
+    const BACKGROUND: &str = "ENSEMBLER_INTERACTIVE_TEST_BACKGROUND";
+
+    if let Ok(mode) = std::env::var(CHILD) {
+        assert!(std::io::stdin().is_terminal());
+        assert!(std::io::stdout().is_terminal());
+        assert!(std::io::stderr().is_terminal());
+        assert_eq!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            nix::unistd::getpgrp()
+        );
+        if mode == "failure" {
+            panic!("intentional interactive child failure");
+        }
+        return;
+    }
+
+    if std::env::var_os(BACKGROUND).is_some() {
+        assert_ne!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            nix::unistd::getpgrp()
+        );
+        let result = CmdLineRunner::new("true").interactive(true).execute().await;
+        let Err(Error::Io(error)) = result else {
+            panic!("Expected an I/O error, got {result:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("foreground process group"));
+        return;
+    }
+
+    if std::env::var_os(DRIVER).is_some() {
+        let executable = std::env::current_exe().unwrap();
+
+        let background_status = Command::new(&executable)
+            .args([
+                "--exact",
+                "test_interactive_terminal_control",
+                "--nocapture",
+            ])
+            .env(BACKGROUND, "1")
+            .process_group(0)
+            .status()
+            .unwrap();
+        assert!(
+            background_status.success(),
+            "background process test failed: {background_status}"
+        );
+
+        let result = CmdLineRunner::new(&executable)
+            .args([
+                "--exact",
+                "test_interactive_terminal_control",
+                "--nocapture",
+            ])
+            .stdin_string("ignored")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .redact(["ignored".to_string()])
+            .env(CHILD, "success")
+            .interactive(true)
+            .execute()
+            .await
+            .unwrap();
+        assert!(result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert!(result.combined_output.is_empty());
+        assert_eq!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            nix::unistd::getpgrp()
+        );
+
+        let result = CmdLineRunner::new(&executable)
+            .args([
+                "--exact",
+                "test_interactive_terminal_control",
+                "--nocapture",
+            ])
+            .env(CHILD, "failure")
+            .interactive(true)
+            .execute()
+            .await;
+        let Err(Error::ScriptFailed(details)) = result else {
+            panic!("Expected ScriptFailed error, got {result:?}");
+        };
+        assert!(details.2.is_empty());
+        assert!(details.3.stdout.is_empty());
+        assert!(details.3.stderr.is_empty());
+        assert!(details.3.combined_output.is_empty());
+        assert_eq!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            nix::unistd::getpgrp()
+        );
+
+        let foreground_pgid = nix::unistd::getpgrp();
+        let task = tokio::spawn(async {
+            CmdLineRunner::new("sleep")
+                .arg("10")
+                .interactive(true)
+                .execute()
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if nix::unistd::tcgetpgrp(std::io::stdin()).unwrap() != foreground_pgid {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            foreground_pgid
+        );
+        CmdLineRunner::kill_all(nix::sys::signal::Signal::SIGKILL);
+
+        let result = CmdLineRunner::new("sleep")
+            .arg("10")
+            .interactive(true)
+            .timeout(Duration::from_millis(100))
+            .execute()
+            .await;
+        assert!(matches!(result, Err(Error::TimedOut)));
+        assert_eq!(
+            nix::unistd::tcgetpgrp(std::io::stdin()).unwrap(),
+            nix::unistd::getpgrp()
+        );
+        return;
+    }
+
+    let executable = std::env::current_exe().unwrap();
+    let mut script = Command::new("script");
+    script.env(DRIVER, "1");
+
+    #[cfg(target_os = "macos")]
+    script.args(["-q", "/dev/null"]).arg(&executable).args([
+        "--exact",
+        "test_interactive_terminal_control",
+        "--nocapture",
+    ]);
+
+    #[cfg(target_os = "linux")]
+    {
+        let executable = executable.to_string_lossy().replace('\'', "'\\''");
+        let command =
+            format!("'{executable}' --exact test_interactive_terminal_control --nocapture");
+        script.args(["--quiet", "--return", "--command", &command, "/dev/null"]);
+    }
+
+    let status = script.status().unwrap();
+    assert!(status.success(), "pseudo-terminal test failed: {status}");
 }

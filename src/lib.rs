@@ -10,6 +10,7 @@
 //! - **Progress integration** - Real-time progress bar updates via the `clx` crate
 //! - **Secret redaction** - Automatically redact sensitive data from output
 //! - **Cancellation** - Support for cancelling running commands via `CancellationToken`
+//! - **Interactive commands** - Run CLI and TUI programs with direct terminal access
 //! - **Cross-platform** - Works on Unix and Windows
 //!
 //! ## Basic Usage
@@ -69,6 +70,33 @@
 //!         .await?;
 //!
 //!     assert_eq!(result.stdout.trim(), "hello from stdin");
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Interactive Commands
+//!
+//! Interactive commands inherit the caller's terminal streams.
+//! Their output is not captured or redacted,
+//! so the returned output fields are empty.
+//! On Unix,
+//! the child process group receives foreground terminal control until it exits.
+//! Terminal control is also restored if the execution future is dropped.
+//! Interactive execution fails if the caller is not the foreground process group.
+//!
+//! ```no_run
+//! use ensembler::CmdLineRunner;
+//!
+//! #[tokio::main]
+//! async fn main() -> ensembler::Result<()> {
+//!     let result = CmdLineRunner::new("vim")
+//!         .arg("README.md")
+//!         .interactive(true)
+//!         .execute()
+//!         .await?;
+//!
+//!     assert!(result.status.success());
+//!     assert!(result.stdout.is_empty());
 //!     Ok(())
 //! }
 //! ```

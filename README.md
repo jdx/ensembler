@@ -9,6 +9,7 @@ A Rust library for executing external commands with advanced output handling and
 - **Progress integration** - Real-time progress bar updates via the `clx` crate
 - **Secret redaction** - Automatically redact sensitive data from output
 - **Cancellation** - Cancel running commands via `CancellationToken`
+- **Interactive commands** - Run CLI and TUI programs with direct terminal access
 - **Cross-platform** - Works on Unix and Windows
 
 ## Installation
@@ -102,6 +103,41 @@ async fn main() -> ensembler::Result<()> {
     Ok(())
 }
 ```
+
+### Interactive Commands
+
+Interactive CLI and TUI programs need direct access to the caller's terminal.
+Enable interactive mode to inherit stdin, stdout, and stderr:
+
+```rust
+use ensembler::CmdLineRunner;
+
+#[tokio::main]
+async fn main() -> ensembler::Result<()> {
+    let result = CmdLineRunner::new("vim")
+        .arg("README.md")
+        .interactive(true)
+        .execute()
+        .await?;
+
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty());
+    Ok(())
+}
+```
+
+Interactive mode overrides configured streams and piped input.
+Output is written directly by the child,
+so Ensembler cannot capture or redact it.
+The returned output fields are empty.
+
+On Unix,
+Ensembler gives the child process group foreground terminal control
+and restores the original foreground process group after the child exits.
+Terminal control is also restored if the execution future is dropped.
+Interactive execution fails if the application is not the foreground process group.
+Progress output is deferred until terminal control is restored.
+The application must avoid concurrent terminal output while the interactive command runs.
 
 ### Cancellation
 

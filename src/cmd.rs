@@ -8,6 +8,8 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::sync::OwnedMutexGuard;
 use tokio::{
     io::BufReader,
     process::Command,
@@ -94,9 +96,47 @@ pub struct CmdLineRunner {
     cancel: CancellationToken,
     allow_non_zero: bool,
     timeout: Option<Duration>,
+    interactive: bool,
 }
 
 static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
+#[cfg(unix)]
+static INTERACTIVE_TERMINAL: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
+
+#[cfg(unix)]
+struct InteractiveTerminalGuard {
+    _lock: OwnedMutexGuard<()>,
+    foreground_pgid: nix::unistd::Pid,
+    restore_on_drop: bool,
+}
+
+#[cfg(unix)]
+impl InteractiveTerminalGuard {
+    fn new(lock: OwnedMutexGuard<()>, foreground_pgid: nix::unistd::Pid) -> Self {
+        Self {
+            _lock: lock,
+            foreground_pgid,
+            restore_on_drop: true,
+        }
+    }
+
+    fn restore(&mut self) -> std::result::Result<(), nix::errno::Errno> {
+        restore_foreground_process_group(self.foreground_pgid)?;
+        self.restore_on_drop = false;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InteractiveTerminalGuard {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            if let Err(error) = restore_foreground_process_group(self.foreground_pgid) {
+                debug!("Failed to restore foreground process group: {error}");
+            }
+        }
+    }
+}
 
 impl CmdLineRunner {
     /// Creates a new command runner for the given program.
@@ -144,6 +184,7 @@ impl CmdLineRunner {
             cancel: CancellationToken::new(),
             allow_non_zero: false,
             timeout: None,
+            interactive: false,
         }
     }
 
@@ -338,6 +379,23 @@ impl CmdLineRunner {
         self
     }
 
+    /// Configures the command to use the caller's terminal interactively.
+    ///
+    /// Interactive commands inherit stdin, stdout, and stderr.
+    /// Their output is not captured or redacted,
+    /// so the returned [`CmdResult`] has empty output fields.
+    /// This setting overrides stream configuration and [`stdin_string`](Self::stdin_string).
+    ///
+    /// On Unix,
+    /// the child process group receives foreground terminal control until it exits.
+    /// Terminal control is also restored if the execution future is dropped.
+    /// Interactive execution fails if the caller is not the foreground process group.
+    /// The application must avoid other terminal output during that time.
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
+    }
+
     /// Sets the working directory for the command.
     pub fn current_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.cmd.current_dir(dir);
@@ -445,14 +503,22 @@ impl CmdLineRunner {
     ///
     /// # Errors
     ///
-    /// - [`Error::Io`] if the command fails to start
+    /// - [`Error::Io`] if the command fails to start,
+    ///   or an interactive caller is not the foreground process group
     /// - [`Error::ScriptFailed`] if the command exits with a non-zero status
     pub async fn execute(mut self) -> Result<CmdResult> {
+        #[cfg(unix)]
+        let interactive_lock = if self.interactive {
+            Some(INTERACTIVE_TERMINAL.clone().lock_owned().await)
+        } else {
+            None
+        };
+
         debug!("$ {self}");
 
         // Build Aho-Corasick automaton for efficient multi-pattern redaction
         // This is done before spawning to avoid orphan processes on build failure
-        let redactor: Option<Arc<Redactor>> = if self.redactions.is_empty() {
+        let redactor: Option<Arc<Redactor>> = if self.interactive || self.redactions.is_empty() {
             None
         } else {
             let automaton = AhoCorasick::new(self.redactions.iter()).map_err(|e| {
@@ -470,11 +536,60 @@ impl CmdLineRunner {
         #[cfg(unix)]
         self.cmd.process_group(0);
 
-        let mut cp = self.cmd.spawn()?;
+        if self.interactive {
+            self.cmd.stdin(Stdio::inherit());
+            self.cmd.stdout(Stdio::inherit());
+            self.cmd.stderr(Stdio::inherit());
+            self.stdin = None;
+        }
+
+        #[cfg(unix)]
+        let mut interactive_terminal = if self.interactive {
+            let foreground_pgid = nix::unistd::tcgetpgrp(std::io::stdin())?;
+            if foreground_pgid != nix::unistd::getpgrp() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "interactive commands require the caller to be the foreground process group",
+                )
+                .into());
+            }
+            unsafe {
+                self.cmd.pre_exec(|| {
+                    let previous = nix::sys::signal::signal(
+                        nix::sys::signal::Signal::SIGTTOU,
+                        nix::sys::signal::SigHandler::SigIgn,
+                    )?;
+                    nix::unistd::tcsetpgrp(std::io::stdin(), nix::unistd::getpid())?;
+                    nix::sys::signal::signal(nix::sys::signal::Signal::SIGTTOU, previous)?;
+                    Ok(())
+                });
+            }
+            Some(InteractiveTerminalGuard::new(
+                interactive_lock.unwrap(),
+                foreground_pgid,
+            ))
+        } else {
+            None
+        };
+
+        let mut cp = match self.cmd.spawn() {
+            Ok(cp) => cp,
+            Err(error) => {
+                #[cfg(unix)]
+                if let Some(terminal) = interactive_terminal.as_mut() {
+                    terminal.restore()?;
+                }
+                return Err(error.into());
+            }
+        };
         let id = match cp.id() {
             Some(id) => id,
             None => {
                 let _ = cp.kill().await;
+                #[cfg(unix)]
+                if let Some(terminal) = interactive_terminal.as_mut() {
+                    terminal.restore()?;
+                }
                 return Err(crate::Error::Internal("process has no id".to_string()));
             }
         };
@@ -484,16 +599,24 @@ impl CmdLineRunner {
             .map_err(|e| e.to_string())
         {
             let _ = cp.kill().await;
+            #[cfg(unix)]
+            if let Some(terminal) = interactive_terminal.as_mut() {
+                terminal.restore()?;
+            }
             return Err(crate::Error::Internal(format!(
                 "failed to lock RUNNING_PIDS: {e}"
             )));
         }
-        trace!("Started process: {id} for {}", self.program);
+        if !self.interactive {
+            trace!("Started process: {id} for {}", self.program);
+        }
         #[cfg(feature = "progress")]
-        if let Some(pr) = &self.pr {
-            pr.prop("ensembler_cmd", &self.to_string());
-            pr.prop("ensembler_stdout", &"".to_string());
-            pr.set_status(progress::ProgressStatus::Running);
+        if !self.interactive {
+            if let Some(pr) = &self.pr {
+                pr.prop("ensembler_cmd", &self.to_string());
+                pr.prop("ensembler_stdout", &"".to_string());
+                pr.set_status(progress::ProgressStatus::Running);
+            }
         }
         let result = Arc::new(Mutex::new(CmdResult::default()));
         let combined_output = Arc::new(Mutex::new(Vec::new()));
@@ -617,28 +740,64 @@ impl CmdLineRunner {
             select! {
                 biased;
                 status = cp.wait() => {
-                    break status?;
+                    break status;
                 }
                 _ = &mut timeout_fut => {
                     timed_out = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if let Err(error) = kill_process_group(id) {
+                        if !self.interactive {
+                            debug!("Failed to kill process group {id}: {error}");
+                        }
+                    }
                     let _ = cp.kill().await;
                 }
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if let Err(error) = kill_process_group(id) {
+                        if !self.interactive {
+                            debug!("Failed to kill process group {id}: {error}");
+                        }
+                    }
                     let _ = cp.kill().await;
                 }
             }
         };
+
+        #[cfg(unix)]
+        let terminal_restore_error = interactive_terminal
+            .as_mut()
+            .and_then(|terminal| terminal.restore().err());
+        #[cfg(unix)]
+        drop(interactive_terminal);
+
         if let Err(e) = RUNNING_PIDS
             .lock()
             .map(|mut pids| pids.remove(&id))
             .map_err(|e| e.to_string())
         {
+            #[cfg(unix)]
+            if terminal_restore_error.is_none() {
+                debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
+            }
+            #[cfg(not(unix))]
             debug!("Failed to lock RUNNING_PIDS to remove pid {id}: {e}");
+        }
+
+        #[cfg(unix)]
+        if let Some(error) = terminal_restore_error {
+            return Err(error.into());
+        }
+
+        let status = status?;
+
+        #[cfg(feature = "progress")]
+        if self.interactive {
+            if let Some(pr) = &self.pr {
+                pr.prop("ensembler_cmd", &self.to_string());
+                pr.prop("ensembler_stdout", &"".to_string());
+            }
         }
 
         if was_cancelled {
@@ -685,7 +844,7 @@ impl CmdLineRunner {
         #[cfg(feature = "progress")]
         if let Some(pr) = &self.pr {
             pr.set_status(progress::ProgressStatus::Failed);
-            if self.show_stderr_on_error {
+            if self.show_stderr_on_error && !output.is_empty() {
                 pr.println(&output);
             }
         }
@@ -701,11 +860,26 @@ impl CmdLineRunner {
 /// Kill an entire process group by PGID (which equals the child PID since
 /// we spawn with process_group(0)).
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+fn kill_process_group(pid: u32) -> std::result::Result<(), nix::errno::Errno> {
     let pgid = nix::unistd::Pid::from_raw(pid as i32);
-    if let Err(e) = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL) {
-        debug!("Failed to kill process group {pid}: {e}");
+    nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL)
+}
+
+#[cfg(unix)]
+fn restore_foreground_process_group(
+    foreground_pgid: nix::unistd::Pid,
+) -> std::result::Result<(), nix::errno::Errno> {
+    unsafe {
+        let previous = nix::sys::signal::signal(
+            nix::sys::signal::Signal::SIGTTOU,
+            nix::sys::signal::SigHandler::SigIgn,
+        )?;
+        let result = nix::unistd::tcsetpgrp(std::io::stdin(), foreground_pgid);
+        let restore_signal = nix::sys::signal::signal(nix::sys::signal::Signal::SIGTTOU, previous);
+        result?;
+        restore_signal?;
     }
+    Ok(())
 }
 
 impl Display for CmdLineRunner {
