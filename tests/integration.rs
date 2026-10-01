@@ -534,17 +534,18 @@ async fn test_interactive_stays_in_callers_process_group() {
     let interactive_out = dir.join("interactive");
     let piped_out = dir.join("piped");
 
-    let script = |out: &std::path::Path| format!("ps -o pgid= -p $$ > {}", out.display());
+    // The path is passed as $1 so a TMPDIR with spaces or metacharacters is safe.
+    let script = r#"ps -o pgid= -p $$ > "$1""#;
     CmdLineRunner::new("sh")
-        .arg("-c")
-        .arg(script(&interactive_out))
+        .args(["-c", script, "sh"])
+        .arg(&interactive_out)
         .interactive(true)
         .execute()
         .await
         .unwrap();
     CmdLineRunner::new("sh")
-        .arg("-c")
-        .arg(script(&piped_out))
+        .args(["-c", script, "sh"])
+        .arg(&piped_out)
         .execute()
         .await
         .unwrap();

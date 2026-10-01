@@ -1,6 +1,6 @@
 use crate::Result;
 use aho_corasick::AhoCorasick;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::path::Path;
@@ -97,7 +97,8 @@ pub struct CmdLineRunner {
     interactive: bool,
 }
 
-static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
+/// Running child PIDs, mapped to whether the child leads its own process group.
+static RUNNING_PIDS: Lazy<std::sync::Mutex<HashMap<u32, bool>>> = Lazy::new(Default::default);
 
 impl CmdLineRunner {
     /// Creates a new command runner for the given program.
@@ -149,10 +150,12 @@ impl CmdLineRunner {
         }
     }
 
-    /// Sends a signal to all running child process groups.
+    /// Sends a signal to all running children.
     ///
     /// Each child is placed in its own process group at spawn time, so this
-    /// kills the entire process tree (not just the direct child).
+    /// signals the entire process tree (not just the direct child).
+    /// [`interactive`](Self::interactive) children share the caller's process
+    /// group, so only the direct child is signaled.
     /// This is useful for graceful shutdown scenarios.
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
@@ -160,12 +163,8 @@ impl CmdLineRunner {
             debug!("Failed to acquire lock on RUNNING_PIDS");
             return;
         };
-        for pid in pids.iter() {
-            let pgid = nix::unistd::Pid::from_raw(*pid as i32);
-            trace!("{signal}: pgid {pid}");
-            if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
-                debug!("Failed to kill process group {pid}: {e}");
-            }
+        for (pid, owns_group) in pids.iter() {
+            signal_child(*pid, *owns_group, signal);
         }
     }
 
@@ -178,7 +177,7 @@ impl CmdLineRunner {
             debug!("Failed to acquire lock on RUNNING_PIDS");
             return;
         };
-        for pid in pids.iter() {
+        for pid in pids.keys() {
             if let Err(e) = Command::new("taskkill")
                 .arg("/F")
                 .arg("/T")
@@ -510,7 +509,7 @@ impl CmdLineRunner {
         };
         if let Err(e) = RUNNING_PIDS
             .lock()
-            .map(|mut pids| pids.insert(id))
+            .map(|mut pids| pids.insert(id, !self.interactive))
             .map_err(|e| e.to_string())
         {
             let _ = cp.kill().await;
@@ -732,6 +731,22 @@ impl CmdLineRunner {
     }
 }
 
+/// Signal a child: its whole process group if it leads one, otherwise just the
+/// child (an interactive child shares the caller's group, which must not be hit).
+#[cfg(unix)]
+fn signal_child(pid: u32, owns_group: bool, signal: nix::sys::signal::Signal) {
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    trace!("{signal}: pid {pid} (own group: {owns_group})");
+    let result = if owns_group {
+        nix::sys::signal::killpg(target, signal)
+    } else {
+        nix::sys::signal::kill(target, signal)
+    };
+    if let Err(e) = result {
+        debug!("Failed to signal {pid}: {e}");
+    }
+}
+
 /// Kill an entire process group by PGID (which equals the child PID since
 /// we spawn with process_group(0)).
 #[cfg(unix)]
@@ -773,4 +788,35 @@ pub struct CmdResult {
     pub combined_output: String,
     /// The exit status of the process.
     pub status: ExitStatus,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+    #[test]
+    fn signal_child_hits_only_the_child_without_its_own_group() {
+        // The child stays in this process's group, so a group signal would hit the
+        // test runner too.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        signal_child(child.id(), false, nix::sys::signal::Signal::SIGKILL);
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(9));
+    }
+
+    #[test]
+    fn signal_child_hits_the_whole_group_it_leads() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        signal_child(child.id(), true, nix::sys::signal::Signal::SIGKILL);
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(9));
+    }
 }
