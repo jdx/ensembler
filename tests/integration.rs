@@ -670,3 +670,34 @@ async fn test_interactive_timeout_kills_child_that_ignores_sigterm() {
     assert!(matches!(result, Err(Error::TimedOut)));
     assert!(start.elapsed() < Duration::from_secs(10));
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_lets_child_clean_up() {
+    let dir = std::env::temp_dir().join(format!(
+        "ensembler-interactive-timeout-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("cleaned-up");
+
+    // The runner's timeout starts at spawn, so it can't wait for the trap like the
+    // cancellation test does. 1.5 s leaves the shell's first instruction ample
+    // margin; a missed trap fails the test rather than passing it.
+    let script = r#"trap 'echo cleaned > "$1"; exit 0' TERM; while :; do sleep 0.1; done"#;
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&marker)
+        .interactive(true)
+        .timeout(Duration::from_millis(1500))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(marker.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
