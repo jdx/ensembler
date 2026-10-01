@@ -18,51 +18,65 @@ fn is_alive(pid: &str) -> bool {
     !stat.is_empty() && !stat.starts_with('Z')
 }
 
-#[tokio::test]
-async fn test_kill_all_reaches_interactive_children_and_descendants() {
-    let dir = std::env::temp_dir().join(format!("ensembler-kill-all-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let pid_file = dir.join("grandchild");
-
-    // Leads its own process group, with a descendant that only a group signal reaches.
-    let grouped = tokio::spawn({
-        let pid_file = pid_file.clone();
-        async move {
-            CmdLineRunner::new("sh")
-                .args(["-c", r#"sleep 30 & echo $! > "$1"; wait"#, "sh"])
-                .arg(pid_file)
-                .execute()
-                .await
-        }
-    });
-    // Shares our process group, so it must be signaled by pid.
-    let interactive = tokio::spawn(async {
-        CmdLineRunner::new("sleep")
-            .arg("30")
-            .interactive(true)
-            .execute()
-            .await
-    });
-
+async fn wait_for_pid(path: &std::path::Path) -> String {
     let start = Instant::now();
-    while !pid_file.exists()
-        || std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .is_empty()
-    {
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            // Written with a trailing newline, so a partial write isn't mistaken for a pid.
+            if pid.ends_with('\n') {
+                return pid.trim().to_string();
+            }
+        }
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "child never started"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // Give the interactive child time to register as running.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let grandchild = std::fs::read_to_string(&pid_file)
+}
+
+#[tokio::test]
+async fn test_kill_all_reaches_interactive_children_and_descendants() {
+    // Unique per run, so a stale file from a reused PID can't satisfy the waits below.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .trim()
-        .to_string();
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("ensembler-kill-all-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let grandchild_file = dir.join("grandchild");
+    let interactive_file = dir.join("interactive");
+
+    // Leads its own process group, with a descendant that only a group signal reaches.
+    let grouped = tokio::spawn({
+        let grandchild_file = grandchild_file.clone();
+        async move {
+            CmdLineRunner::new("sh")
+                .args(["-c", r#"sleep 30 & echo $! > "$1"; wait"#, "sh"])
+                .arg(grandchild_file)
+                .execute()
+                .await
+        }
+    });
+    // Shares our process group, so it must be signaled by pid.
+    let interactive = tokio::spawn({
+        let interactive_file = interactive_file.clone();
+        async move {
+            CmdLineRunner::new("sh")
+                .args(["-c", r#"echo $$ > "$1"; exec sleep 30"#, "sh"])
+                .arg(interactive_file)
+                .interactive(true)
+                .execute()
+                .await
+        }
+    });
+
+    // Both children report in once running. The runner registers a child right
+    // after spawning it, with no await in between, long before the child's shell
+    // gets to write its file.
+    let grandchild = wait_for_pid(&grandchild_file).await;
+    wait_for_pid(&interactive_file).await;
     assert!(is_alive(&grandchild));
 
     CmdLineRunner::kill_all(Signal::SIGTERM);
@@ -81,4 +95,5 @@ async fn test_kill_all_reaches_interactive_children_and_descendants() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let _ = std::fs::remove_dir_all(&dir);
 }
