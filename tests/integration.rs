@@ -516,3 +516,96 @@ async fn test_timeout_not_reached() {
     assert!(result.status.success());
     assert_eq!(result.stdout.trim(), "fast");
 }
+
+#[cfg(unix)]
+fn pgid_of(pid: &str) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_stays_in_callers_process_group() {
+    let dir = std::env::temp_dir().join(format!("ensembler-interactive-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let interactive_out = dir.join("interactive");
+    let piped_out = dir.join("piped");
+
+    let script = |out: &std::path::Path| format!("ps -o pgid= -p $$ > {}", out.display());
+    CmdLineRunner::new("sh")
+        .arg("-c")
+        .arg(script(&interactive_out))
+        .interactive(true)
+        .execute()
+        .await
+        .unwrap();
+    CmdLineRunner::new("sh")
+        .arg("-c")
+        .arg(script(&piped_out))
+        .execute()
+        .await
+        .unwrap();
+
+    let ours = pgid_of(&std::process::id().to_string());
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap().trim().to_string();
+    assert_eq!(read(&interactive_out), ours);
+    assert_ne!(read(&piped_out), ours);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_does_not_capture_output_or_pipe_stdin() {
+    let result = CmdLineRunner::new("sh")
+        .arg("-c")
+        .arg("echo hi >/dev/null; exit 0")
+        .stdin_string("ignored")
+        .interactive(true)
+        .execute()
+        .await
+        .unwrap();
+
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    assert!(result.combined_output.is_empty());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_cancellation_kills_child() {
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        trigger.cancel();
+    });
+
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sleep")
+        .arg("30")
+        .interactive(true)
+        .with_cancel_token(cancel)
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_kills_child() {
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sleep")
+        .arg("30")
+        .interactive(true)
+        .timeout(Duration::from_millis(100))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}

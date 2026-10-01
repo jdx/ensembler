@@ -94,6 +94,7 @@ pub struct CmdLineRunner {
     cancel: CancellationToken,
     allow_non_zero: bool,
     timeout: Option<Duration>,
+    interactive: bool,
 }
 
 static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
@@ -144,6 +145,7 @@ impl CmdLineRunner {
             cancel: CancellationToken::new(),
             allow_non_zero: false,
             timeout: None,
+            interactive: false,
         }
     }
 
@@ -338,6 +340,23 @@ impl CmdLineRunner {
         self
     }
 
+    /// Configures the command to use the caller's terminal interactively.
+    ///
+    /// The command inherits stdin, stdout, and stderr, overriding any stream
+    /// configuration and [`stdin_string`](Self::stdin_string). Its output is not
+    /// captured or redacted, so the returned [`CmdResult`] has empty output fields.
+    ///
+    /// On Unix the command also stays in the caller's process group instead of
+    /// getting its own. Terminal programs that switch to raw mode or the alternate
+    /// screen (`vim`, `helix`, `fzf`, ...) are stopped with `SIGTTOU` or `SIGTTIN` when
+    /// they run in a background process group, so they must share the caller's.
+    /// As a result, timeout and cancellation kill only the direct child, not its
+    /// descendants.
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
+    }
+
     /// Sets the working directory for the command.
     pub fn current_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.cmd.current_dir(dir);
@@ -465,10 +484,21 @@ impl CmdLineRunner {
             }))
         };
 
+        if self.interactive {
+            self.cmd.stdin(Stdio::inherit());
+            self.cmd.stdout(Stdio::inherit());
+            self.cmd.stderr(Stdio::inherit());
+            self.stdin = None;
+        }
+
         // Put the child in its own process group so we can kill the entire
-        // tree on timeout/cancellation (not just the direct child).
+        // tree on timeout/cancellation (not just the direct child). Interactive
+        // children stay in ours: a background process group can't control the
+        // terminal.
         #[cfg(unix)]
-        self.cmd.process_group(0);
+        if !self.interactive {
+            self.cmd.process_group(0);
+        }
 
         let mut cp = self.cmd.spawn()?;
         let id = match cp.id() {
@@ -622,13 +652,17 @@ impl CmdLineRunner {
                 _ = &mut timeout_fut => {
                     timed_out = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if !self.interactive {
+                        kill_process_group(id);
+                    }
                     let _ = cp.kill().await;
                 }
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if !self.interactive {
+                        kill_process_group(id);
+                    }
                     let _ = cp.kill().await;
                 }
             }
