@@ -616,7 +616,7 @@ async fn test_interactive_timeout_kills_child() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn test_interactive_timeout_lets_child_clean_up() {
+async fn test_interactive_cancellation_lets_child_clean_up() {
     let dir = std::env::temp_dir().join(format!(
         "ensembler-interactive-term-{}-{}",
         std::process::id(),
@@ -626,19 +626,32 @@ async fn test_interactive_timeout_lets_child_clean_up() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    let ready = dir.join("ready");
     let marker = dir.join("cleaned-up");
 
     // Like a TUI restoring the terminal on SIGTERM; SIGKILL would skip the trap.
-    let script = r#"trap 'echo cleaned > "$1"; exit 0' TERM; while :; do sleep 0.1; done"#;
+    // It reports in only once the trap is installed, so the signal can't beat it.
+    let script = r#"trap 'echo cleaned > "$2"; exit 0' TERM; echo ready > "$1"; while :; do sleep 0.1; done"#;
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let watched = ready.clone();
+    tokio::spawn(async move {
+        let start = Instant::now();
+        while !watched.exists() && start.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        trigger.cancel();
+    });
     let result = CmdLineRunner::new("sh")
         .args(["-c", script, "sh"])
+        .arg(&ready)
         .arg(&marker)
         .interactive(true)
-        .timeout(Duration::from_millis(300))
+        .with_cancel_token(cancel)
         .execute()
         .await;
 
-    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(matches!(result, Err(Error::Cancelled)));
     assert!(marker.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
