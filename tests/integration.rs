@@ -516,3 +516,188 @@ async fn test_timeout_not_reached() {
     assert!(result.status.success());
     assert_eq!(result.stdout.trim(), "fast");
 }
+
+#[cfg(unix)]
+fn pgid_of(pid: &str) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_stays_in_callers_process_group() {
+    let dir = std::env::temp_dir().join(format!("ensembler-interactive-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let interactive_out = dir.join("interactive");
+    let piped_out = dir.join("piped");
+
+    // The path is passed as $1 so a TMPDIR with spaces or metacharacters is safe.
+    let script = r#"ps -o pgid= -p $$ > "$1""#;
+    CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&interactive_out)
+        .interactive(true)
+        .execute()
+        .await
+        .unwrap();
+    CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&piped_out)
+        .execute()
+        .await
+        .unwrap();
+
+    let ours = pgid_of(&std::process::id().to_string());
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap().trim().to_string();
+    assert_eq!(read(&interactive_out), ours);
+    assert_ne!(read(&piped_out), ours);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_does_not_capture_output_or_pipe_stdin() {
+    // The child writes to both streams, so captured output would show up in the
+    // result. Had `stdin_string` stayed piped, the runner would fail for lack of a
+    // stdin handle.
+    let result = CmdLineRunner::new("sh")
+        .arg("-c")
+        .arg("echo out; echo err >&2")
+        .stdin_string("ignored")
+        .interactive(true)
+        .execute()
+        .await
+        .unwrap();
+
+    assert!(result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(result.stderr.is_empty());
+    assert!(result.combined_output.is_empty());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_cancellation_kills_child() {
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        trigger.cancel();
+    });
+
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sleep")
+        .arg("30")
+        .interactive(true)
+        .with_cancel_token(cancel)
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_kills_child() {
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sleep")
+        .arg("30")
+        .interactive(true)
+        .timeout(Duration::from_millis(100))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_cancellation_lets_child_clean_up() {
+    let dir = std::env::temp_dir().join(format!(
+        "ensembler-interactive-term-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ready = dir.join("ready");
+    let marker = dir.join("cleaned-up");
+
+    // Like a TUI restoring the terminal on SIGTERM; SIGKILL would skip the trap.
+    // It reports in only once the trap is installed, so the signal can't beat it.
+    let script = r#"trap 'echo cleaned > "$2"; exit 0' TERM; echo ready > "$1"; while :; do sleep 0.1; done"#;
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    let watched = ready.clone();
+    tokio::spawn(async move {
+        let start = Instant::now();
+        while !watched.exists() && start.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        trigger.cancel();
+    });
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&ready)
+        .arg(&marker)
+        .interactive(true)
+        .with_cancel_token(cancel)
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(marker.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_kills_child_that_ignores_sigterm() {
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", "trap '' TERM; while :; do sleep 0.1; done"])
+        .interactive(true)
+        .timeout(Duration::from_millis(100))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_lets_child_clean_up() {
+    let dir = std::env::temp_dir().join(format!(
+        "ensembler-interactive-timeout-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("cleaned-up");
+
+    // The runner's timeout starts at spawn, so it can't wait for the trap like the
+    // cancellation test does. 1.5 s leaves the shell's first instruction ample
+    // margin; a missed trap fails the test rather than passing it.
+    let script = r#"trap 'echo cleaned > "$1"; exit 0' TERM; while :; do sleep 0.1; done"#;
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&marker)
+        .interactive(true)
+        .timeout(Duration::from_millis(1500))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(marker.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

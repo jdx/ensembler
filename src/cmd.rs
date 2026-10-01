@@ -1,6 +1,6 @@
 use crate::Result;
 use aho_corasick::AhoCorasick;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::path::Path;
@@ -94,9 +94,11 @@ pub struct CmdLineRunner {
     cancel: CancellationToken,
     allow_non_zero: bool,
     timeout: Option<Duration>,
+    interactive: bool,
 }
 
-static RUNNING_PIDS: Lazy<std::sync::Mutex<HashSet<u32>>> = Lazy::new(Default::default);
+/// Running child PIDs, mapped to whether the child leads its own process group.
+static RUNNING_PIDS: Lazy<std::sync::Mutex<HashMap<u32, bool>>> = Lazy::new(Default::default);
 
 impl CmdLineRunner {
     /// Creates a new command runner for the given program.
@@ -144,13 +146,16 @@ impl CmdLineRunner {
             cancel: CancellationToken::new(),
             allow_non_zero: false,
             timeout: None,
+            interactive: false,
         }
     }
 
-    /// Sends a signal to all running child process groups.
+    /// Sends a signal to all running children.
     ///
     /// Each child is placed in its own process group at spawn time, so this
-    /// kills the entire process tree (not just the direct child).
+    /// signals the entire process tree (not just the direct child).
+    /// [`interactive`](Self::interactive) children share the caller's process
+    /// group, so only the direct child is signaled.
     /// This is useful for graceful shutdown scenarios.
     #[cfg(unix)]
     pub fn kill_all(signal: nix::sys::signal::Signal) {
@@ -158,12 +163,8 @@ impl CmdLineRunner {
             debug!("Failed to acquire lock on RUNNING_PIDS");
             return;
         };
-        for pid in pids.iter() {
-            let pgid = nix::unistd::Pid::from_raw(*pid as i32);
-            trace!("{signal}: pgid {pid}");
-            if let Err(e) = nix::sys::signal::killpg(pgid, signal) {
-                debug!("Failed to kill process group {pid}: {e}");
-            }
+        for (pid, owns_group) in pids.iter() {
+            signal_child(*pid, *owns_group, signal);
         }
     }
 
@@ -176,7 +177,7 @@ impl CmdLineRunner {
             debug!("Failed to acquire lock on RUNNING_PIDS");
             return;
         };
-        for pid in pids.iter() {
+        for pid in pids.keys() {
             if let Err(e) = Command::new("taskkill")
                 .arg("/F")
                 .arg("/T")
@@ -338,6 +339,24 @@ impl CmdLineRunner {
         self
     }
 
+    /// Configures the command to use the caller's terminal interactively.
+    ///
+    /// The command inherits stdin, stdout, and stderr, overriding any stream
+    /// configuration and [`stdin_string`](Self::stdin_string). Its output is not
+    /// captured or redacted, so the returned [`CmdResult`] has empty output fields.
+    ///
+    /// On Unix the command also stays in the caller's process group instead of
+    /// getting its own. Terminal programs that switch to raw mode or the alternate
+    /// screen (`vim`, `helix`, `fzf`, ...) are stopped with `SIGTTOU` or `SIGTTIN` when
+    /// they run in a background process group, so they must share the caller's.
+    /// As a result, timeout and cancellation signal only the direct child, not its
+    /// descendants. They send `SIGTERM` first so the program can restore the
+    /// terminal, and `SIGKILL` if it is still running after two seconds.
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = interactive;
+        self
+    }
+
     /// Sets the working directory for the command.
     pub fn current_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
         self.cmd.current_dir(dir);
@@ -465,10 +484,21 @@ impl CmdLineRunner {
             }))
         };
 
+        if self.interactive {
+            self.cmd.stdin(Stdio::inherit());
+            self.cmd.stdout(Stdio::inherit());
+            self.cmd.stderr(Stdio::inherit());
+            self.stdin = None;
+        }
+
         // Put the child in its own process group so we can kill the entire
-        // tree on timeout/cancellation (not just the direct child).
+        // tree on timeout/cancellation (not just the direct child). Interactive
+        // children stay in ours: a background process group can't control the
+        // terminal.
         #[cfg(unix)]
-        self.cmd.process_group(0);
+        if !self.interactive {
+            self.cmd.process_group(0);
+        }
 
         let mut cp = self.cmd.spawn()?;
         let id = match cp.id() {
@@ -480,7 +510,7 @@ impl CmdLineRunner {
         };
         if let Err(e) = RUNNING_PIDS
             .lock()
-            .map(|mut pids| pids.insert(id))
+            .map(|mut pids| pids.insert(id, !self.interactive))
             .map_err(|e| e.to_string())
         {
             let _ = cp.kill().await;
@@ -622,13 +652,21 @@ impl CmdLineRunner {
                 _ = &mut timeout_fut => {
                     timed_out = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if self.interactive {
+                        terminate_interactive(&mut cp, id).await;
+                    } else {
+                        kill_process_group(id);
+                    }
                     let _ = cp.kill().await;
                 }
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
                     #[cfg(unix)]
-                    kill_process_group(id);
+                    if self.interactive {
+                        terminate_interactive(&mut cp, id).await;
+                    } else {
+                        kill_process_group(id);
+                    }
                     let _ = cp.kill().await;
                 }
             }
@@ -695,6 +733,38 @@ impl CmdLineRunner {
             output,
             result,
         ))))?
+    }
+}
+
+/// How long an interactive child gets to restore the terminal after `SIGTERM`
+/// before it is killed.
+#[cfg(unix)]
+const INTERACTIVE_GRACE: Duration = Duration::from_secs(2);
+
+/// Ask an interactive child to exit with `SIGTERM` and wait for it, so a TUI can
+/// leave raw mode and the alternate screen. The caller kills it if it is still
+/// running afterwards.
+#[cfg(unix)]
+async fn terminate_interactive(cp: &mut tokio::process::Child, pid: u32) {
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    if nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).is_ok() {
+        let _ = tokio::time::timeout(INTERACTIVE_GRACE, cp.wait()).await;
+    }
+}
+
+/// Signal a child: its whole process group if it leads one, otherwise just the
+/// child (an interactive child shares the caller's group, which must not be hit).
+#[cfg(unix)]
+fn signal_child(pid: u32, owns_group: bool, signal: nix::sys::signal::Signal) {
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    trace!("{signal}: pid {pid} (own group: {owns_group})");
+    let result = if owns_group {
+        nix::sys::signal::killpg(target, signal)
+    } else {
+        nix::sys::signal::kill(target, signal)
+    };
+    if let Err(e) = result {
+        debug!("Failed to signal {pid}: {e}");
     }
 }
 
