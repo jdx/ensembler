@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.6](https://github.com/jdx/ensembler/compare/v1.1.5...v1.1.6) - 2026-10-01
+
+### Fixed
+
+- keep interactive commands in the caller's process group ([#141](https://github.com/jdx/ensembler/pull/141))
+
 ## [1.1.5](https://github.com/jdx/ensembler/compare/v1.1.4...v1.1.5) - 2026-09-27
 
 ### Fixed
