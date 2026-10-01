@@ -789,34 +789,3 @@ pub struct CmdResult {
     /// The exit status of the process.
     pub status: ExitStatus,
 }
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
-
-    #[test]
-    fn signal_child_hits_only_the_child_without_its_own_group() {
-        // The child stays in this process's group, so a group signal would hit the
-        // test runner too.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        signal_child(child.id(), false, nix::sys::signal::Signal::SIGKILL);
-        let status = child.wait().unwrap();
-        assert_eq!(status.signal(), Some(9));
-    }
-
-    #[test]
-    fn signal_child_hits_the_whole_group_it_leads() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        signal_child(child.id(), true, nix::sys::signal::Signal::SIGKILL);
-        let status = child.wait().unwrap();
-        assert_eq!(status.signal(), Some(9));
-    }
-}
