@@ -559,9 +559,12 @@ async fn test_interactive_stays_in_callers_process_group() {
 #[tokio::test]
 #[cfg(unix)]
 async fn test_interactive_does_not_capture_output_or_pipe_stdin() {
+    // The child writes to both streams, so captured output would show up in the
+    // result. Had `stdin_string` stayed piped, the runner would fail for lack of a
+    // stdin handle.
     let result = CmdLineRunner::new("sh")
         .arg("-c")
-        .arg("echo hi >/dev/null; exit 0")
+        .arg("echo out; echo err >&2")
         .stdin_string("ignored")
         .interactive(true)
         .execute()
@@ -602,6 +605,50 @@ async fn test_interactive_timeout_kills_child() {
     let start = Instant::now();
     let result = CmdLineRunner::new("sleep")
         .arg("30")
+        .interactive(true)
+        .timeout(Duration::from_millis(100))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(start.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_lets_child_clean_up() {
+    let dir = std::env::temp_dir().join(format!(
+        "ensembler-interactive-term-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("cleaned-up");
+
+    // Like a TUI restoring the terminal on SIGTERM; SIGKILL would skip the trap.
+    let script = r#"trap 'echo cleaned > "$1"; exit 0' TERM; while :; do sleep 0.1; done"#;
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", script, "sh"])
+        .arg(&marker)
+        .interactive(true)
+        .timeout(Duration::from_millis(300))
+        .execute()
+        .await;
+
+    assert!(matches!(result, Err(Error::TimedOut)));
+    assert!(marker.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn test_interactive_timeout_kills_child_that_ignores_sigterm() {
+    let start = Instant::now();
+    let result = CmdLineRunner::new("sh")
+        .args(["-c", "trap '' TERM; while :; do sleep 0.1; done"])
         .interactive(true)
         .timeout(Duration::from_millis(100))
         .execute()

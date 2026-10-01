@@ -349,8 +349,9 @@ impl CmdLineRunner {
     /// getting its own. Terminal programs that switch to raw mode or the alternate
     /// screen (`vim`, `helix`, `fzf`, ...) are stopped with `SIGTTOU` or `SIGTTIN` when
     /// they run in a background process group, so they must share the caller's.
-    /// As a result, timeout and cancellation kill only the direct child, not its
-    /// descendants.
+    /// As a result, timeout and cancellation signal only the direct child, not its
+    /// descendants. They send `SIGTERM` first so the program can restore the
+    /// terminal, and `SIGKILL` if it is still running after two seconds.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
         self
@@ -651,7 +652,9 @@ impl CmdLineRunner {
                 _ = &mut timeout_fut => {
                     timed_out = true;
                     #[cfg(unix)]
-                    if !self.interactive {
+                    if self.interactive {
+                        terminate_interactive(&mut cp, id).await;
+                    } else {
                         kill_process_group(id);
                     }
                     let _ = cp.kill().await;
@@ -659,7 +662,9 @@ impl CmdLineRunner {
                 _ = self.cancel.cancelled() => {
                     was_cancelled = true;
                     #[cfg(unix)]
-                    if !self.interactive {
+                    if self.interactive {
+                        terminate_interactive(&mut cp, id).await;
+                    } else {
                         kill_process_group(id);
                     }
                     let _ = cp.kill().await;
@@ -728,6 +733,22 @@ impl CmdLineRunner {
             output,
             result,
         ))))?
+    }
+}
+
+/// How long an interactive child gets to restore the terminal after `SIGTERM`
+/// before it is killed.
+#[cfg(unix)]
+const INTERACTIVE_GRACE: Duration = Duration::from_secs(2);
+
+/// Ask an interactive child to exit with `SIGTERM` and wait for it, so a TUI can
+/// leave raw mode and the alternate screen. The caller kills it if it is still
+/// running afterwards.
+#[cfg(unix)]
+async fn terminate_interactive(cp: &mut tokio::process::Child, pid: u32) {
+    let target = nix::unistd::Pid::from_raw(pid as i32);
+    if nix::sys::signal::kill(target, nix::sys::signal::Signal::SIGTERM).is_ok() {
+        let _ = tokio::time::timeout(INTERACTIVE_GRACE, cp.wait()).await;
     }
 }
 

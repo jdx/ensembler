@@ -128,7 +128,8 @@ so the returned output fields are empty.
 On Unix the child also stays in the caller's process group
 (normally commands get their own),
 because a background process group can't use raw mode or the alternate screen.
-Timeout and cancellation then kill only the direct child, not its descendants.
+Timeout and cancellation then signal only the direct child, not its descendants:
+`SIGTERM` first, so it can restore the terminal, then `SIGKILL` after two seconds.
 
 ### Cancellation
 
