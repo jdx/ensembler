@@ -93,9 +93,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "clx"
-version = "3.0.3"
+version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612147d677ba3f69a2600c226541080e3e0432b3c3294600e9646ed21cb476a4"
+checksum = "cea51a952e2d16a0589c18b4b38943583c9dc975077cb803813f695b22b708ab"
 dependencies = [
  "console",
  "nix",
