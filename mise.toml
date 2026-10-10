@@ -9,6 +9,5 @@ run = [
 "cargo:cargo-msrv" = "latest"
 # hk.pkl amends a pinned hk package; the tools themselves float and are resolved by mise.lock.
 hk = { version = "latest", minimum_release_age = "0s" }
-# Exact pin: jactionlint 2.0.2 is newer than the default 24h release-age holdback until 2026-10-10 20:00Z. Loosen to the previous selector after that.
-jactionlint = "2.0.2"
+jactionlint = "2.1.0"
 pkl = "latest"
