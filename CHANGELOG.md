@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.7](https://github.com/jdx/ensembler/compare/v1.1.6...v1.1.7) - 2026-11-27
+
+### Fixed
+
+- *(deps)* update rust crate nix to 0.32 ([#176](https://github.com/jdx/ensembler/pull/176))
+
 ## [1.1.6](https://github.com/jdx/ensembler/compare/v1.1.5...v1.1.6) - 2026-10-01
 
 ### Fixed
