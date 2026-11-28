@@ -781,7 +781,7 @@ fn kill_process_group(pid: u32) {
 impl Display for CmdLineRunner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let args = self.args.join(" ");
-        let mut cmd = format!("{} {}", &self.program, args);
+        let mut cmd = format!("{} {}", self.program, args);
         if cmd.starts_with("sh -o errexit -c ") {
             cmd = cmd[17..].to_string();
         }
